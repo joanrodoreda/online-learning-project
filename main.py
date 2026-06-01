@@ -130,9 +130,11 @@ def run_single_trial(
         # 1. Agent picks arm index
         arm_idx = agent.pull_arm()
 
-        # 2. Map arm index → bid value, execute auction round
+        # 2. Map arm index → bid value, execute auction round.
+        #    round() returns only (win_t, r_t, c_t) — bandit feedback per
+        #    project spec slide 6 ("set of won auctions").
         b_t = bid_set[arm_idx]
-        m_t, win_t, r_t, c_t = env.round(b_t)
+        win_t, r_t, c_t = env.round(b_t)
 
         # 3. Agent updates internal statistics
         agent.update(r_t, c_t)
@@ -518,10 +520,16 @@ def print_summary_table(
     for label, res in results.items():
         budget_ok = "N/A"
         if budget_map and label in budget_map:
-            B = budget_map[label]
-            # Check if mean cumulative cost at T ≤ B across all trials
+            B        = budget_map[label]
+            # Check strict budget compliance across all trials.
+            # Use the MAX over all trials (worst-case), not the mean.
             max_cost = res.costs.cumsum(axis=1)[:, -1].max()
-            budget_ok = "YES" if max_cost <= B * 1.05 else "NO"
+            overshoot = max(0.0, max_cost - B)
+            budget_ok = (
+                f"YES"               if overshoot == 0.0   else
+                f"~YES (+{overshoot:.1f})" if overshoot < 1.0   else
+                f"NO  (+{overshoot:.1f})"
+            )
         print(
             f"  {label:<30}  {res.final_regret_mean:>10.2f}  "
             f"{res.final_regret_std:>8.2f}  {budget_ok:>10}"
@@ -829,18 +837,24 @@ def main():
     print("\n[0] Validating environment ...")
     validate_environment(V, BID_SET, dist_config, n_rounds=5_000)
 
-    # ── Step 1: Experiment A ──────────────────────────────────────────────────
-    print("\n[1] Experiment A — Algorithm comparison (no budget)")
-    run_experiment_A(dist_config=dist_config, T=T, n_trials=N_TRIALS)
+    # ── Step 1: Experiment A — all three distributions ───────────────────────
+    print("\n[1a] Experiment A — Uniform(0,1) distribution")
+    run_experiment_A(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
 
-    # ── Step 2: Experiment B ──────────────────────────────────────────────────
-    print("\n[2] Experiment B — Budget constraint effect")
-    run_experiment_B(dist_config=dist_config, T=T, n_trials=N_TRIALS)
+    print("\n[1b] Experiment A — Beta(2,5) distribution")
+    run_experiment_A(dist_config=DIST_CONFIGS["beta"], T=T, n_trials=N_TRIALS)
 
-    # ── Step 3: Experiment C ─────────────────────────────────────────────────
-    print("\n[3] Experiment C — Regret scaling vs. T")
+    print("\n[1c] Experiment A — Truncated Normal(0.5, 0.2) distribution")
+    run_experiment_A(dist_config=DIST_CONFIGS["normal"], T=T, n_trials=N_TRIALS)
+
+    # ── Step 2: Experiment B — budget constraint (uniform, canonical case) ───
+    print("\n[2] Experiment B — Budget constraint effect  [Uniform(0,1)]")
+    run_experiment_B(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
+
+    # ── Step 3: Experiment C — regret scaling ────────────────────────────────
+    print("\n[3] Experiment C — Regret scaling vs. T  [Uniform(0,1)]")
     run_experiment_C(
-        dist_config = dist_config,
+        dist_config = DIST_CONFIGS["uniform"],
         T_values    = [500, 1_000, 2_000, 5_000, 10_000],
         n_trials    = 20,
     )

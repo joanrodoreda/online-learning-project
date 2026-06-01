@@ -124,10 +124,13 @@ class SingleCampaignEnv(Environment):
 
         Returns
         -------
-        m_t   : float   Realized competing bid (observed feedback).
-        win_t : bool    True iff b_t ≥ m_t.
+        win_t : bool    True iff b_t ≥ m_t  (won the auction).
         r_t   : float   Reward = (v − b_t) · win_t   ∈ [0, v].
         c_t   : float   Cost   =        b_t · win_t   ∈ [0, v].
+
+        Note: the competing bid m_t is NOT returned.  Per the project
+        specification (slide 6), agents only observe the set of won auctions,
+        not the exact competing bid value.
         """
         if self.t >= self.T:
             raise RuntimeError(
@@ -140,7 +143,10 @@ class SingleCampaignEnv(Environment):
         r_t   = float((self.v - b_t) * win_t)
         c_t   = float(b_t            * win_t)
         self.t += 1
-        return m_t, win_t, r_t, c_t
+        # Return only bandit feedback (project spec, slide 6: "set of won
+        # auctions").  m_t is intentionally withheld from callers — it is not
+        # observable in a first-price auction.
+        return win_t, r_t, c_t
 
     def reset(self):
         """Reset round counter.  Does NOT re-sample competing bids."""
@@ -252,7 +258,7 @@ def compute_clairvoyant(
     -------
     x_opt     : (K,) array   Optimal mixed strategy x*(b).
     opt_value : float        OPT (or OPT^S) — expected per-round reward.
-    opt_cost  : float        Expected per-round cost Σ_b x*(b)·b.
+    opt_cost  : float        Expected per-round cost Σ_b x*(b)·b·F_D(b).
     """
     mu  = compute_true_arm_means(bid_set, v, dist_config)
     K   = len(bid_set)
@@ -266,10 +272,18 @@ def compute_clairvoyant(
         return x_opt, float(mu[best]), float(bids[best])
 
     # ── Budget-constrained: LP  (notebook 08 pattern) ───────────────────────
+    # Per the project spec (slide 6): cost is incurred ONLY when winning.
+    # Expected realized cost of bid b = b · P(win with b) = b · F_D(b).
+    # The LP constraint must be:  Σ x(b)·b·F_D(b) ≤ ρ
+    # Using raw bid b (as in notebook 08's generic bandit) would assume you
+    # always pay b regardless of winning — overly pessimistic for auctions.
+    F        = _compute_cdf(bid_set, v, dist_config)   # F_D(b) per bid
+    cost_vec = bids * F                                 # E[cost | bid b]
+
     # scipy.optimize.linprog minimises → pass objective as  −μ
     res = linprog(
         c       = -mu,                     # minimise  −Σ x(b)·μ(b)
-        A_ub    = [bids],                  # Σ x(b)·b ≤ ρ
+        A_ub    = [cost_vec],              # Σ x(b)·b·F_D(b) ≤ ρ
         b_ub    = [rho],
         A_eq    = [np.ones(K)],            # Σ x(b) = 1  (simplex)
         b_eq    = [1.0],
@@ -285,7 +299,7 @@ def compute_clairvoyant(
 
     x_opt     = np.asarray(res.x, dtype=float)
     opt_value = float(-res.fun)
-    opt_cost  = float(bids @ x_opt)
+    opt_cost  = float(cost_vec @ x_opt)   # E[realized cost per round]
     return x_opt, opt_value, opt_cost
 
 
@@ -335,7 +349,7 @@ def validate_environment(v: float, bid_set: np.ndarray, dist_config: dict,
         env = SingleCampaignEnv(v, bid_set, n_rounds, dist_config)
         wins = 0
         for _ in range(n_rounds):
-            _, win_t, r_t, c_t = env.round(b)
+            win_t, r_t, c_t = env.round(b)
             wins += int(win_t)
 
         win_rate_empirical = wins / n_rounds

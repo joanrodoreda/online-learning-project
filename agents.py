@@ -26,6 +26,7 @@ Theory references are cited inline with notebook/lecture anchors.
 from __future__ import annotations
 
 import numpy as np
+from config import UCB_EXPLORATION_FACTOR
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -298,7 +299,7 @@ class UCB1BiddingAgent(Agent):
         else:
             # UCB selection  (notebook 01, cell UCB1Agent.pull_arm)
             ucbs = self.average_rewards + np.sqrt(
-                2.0 * np.log(self.T) / self.N_pulls
+                UCB_EXPLORATION_FACTOR * np.log(self.T) / self.N_pulls
             )
             self.a_t = int(np.argmax(ucbs))
         return self.a_t
@@ -437,7 +438,7 @@ class BudgetUCB1BiddingAgent(Agent):
 
         # ── Modified UCB selection ───────────────────────────────────────────
         ucbs = self.average_rewards + np.sqrt(
-            2.0 * np.log(self.T) / self.N_pulls
+            UCB_EXPLORATION_FACTOR * np.log(self.T) / self.N_pulls
         )
         # Lagrangian penalty: normalise bid by v so penalty lives in [0, 1]
         penalty  = self.lmbd * (self.bid_set / self.v)
