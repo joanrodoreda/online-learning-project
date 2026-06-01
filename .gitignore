@@ -1,0 +1,19 @@
+# Caché de Python y entornos
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+.DS_Store
+
+# --- EXCLUSIONES DEL PROYECTO ---
+# Ignorar todos los notebooks de teoría del profesor
+01_stochastic_mabs.ipynb
+02_stochastic_mabs_2.ipynb
+03_adversarial_mabs.ipynb
+04_dynamic_pricing_discretization.ipynb
+05_dynamic_pricing_gp.ipynb
+06_truthful_auctions.ipynb
+07_non_truthful.ipynb
+08_constrained_problems.ipynb
+09_combinatorial_mabs.ipynb
+10_nonstationary_bandits.ipynb
