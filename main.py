@@ -33,6 +33,19 @@ import matplotlib.ticker as mticker
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Type
 
+
+from dataclasses import dataclass
+from typing import Dict, Sequence
+
+import json
+from pathlib import Path
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from agents import CombinatorialUCB1BiddingAgent
+from environment import MultiCampaignEnv, compute_clairvoyant_mc
+
 # ── Project modules ──────────────────────────────────────────────────────────
 from config import (
     V, BID_SET, K, T, N_TRIALS, RANDOM_SEED_START,
@@ -56,6 +69,7 @@ from agents import (
     UCB1BiddingAgent,
     BudgetUCB1BiddingAgent,
 )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Global flag — set to True to save every figure as a PNG
@@ -802,7 +816,193 @@ def run_experiment_C(
         filename       = "exp_C_scaling_budget",
     )
 
+"""
+main_req2.py — Requirement 2 orchestration
+==========================================
+Standalone runner for the multiple-campaign stochastic environment.
+"""
 
+
+@dataclass
+class TrialResult2:
+    rewards: np.ndarray
+    costs: np.ndarray
+    regrets: np.ndarray
+    actions: np.ndarray
+    lambda_history: np.ndarray
+    budget_history: np.ndarray
+
+
+def run_single_trial2(
+    env: MultiCampaignEnv,
+    agent: CombinatorialUCB1BiddingAgent,
+    clairvoyant_value: float,
+) -> TrialResult2:
+    # Store the per-round outcomes for one complete trial.
+    rewards = np.zeros((env.T, env.n_campaigns), dtype=float)
+    costs = np.zeros((env.T, env.n_campaigns), dtype=float)
+    regrets = np.zeros(env.T, dtype=float)
+    actions = np.zeros((env.T, env.n_campaigns), dtype=bool)
+
+    for t in range(env.T):
+        # 1) Agent chooses the campaigns and bids.
+        bids, active = agent.pull_action()
+        # 2) Environment returns the realized feedback.
+        win_t, r_t, c_t = env.round(bids, active)
+        # 3) Agent updates its estimates.
+        agent.update(r_t, c_t)
+        rewards[t] = r_t
+        costs[t] = c_t
+        actions[t] = active
+        # Regret is computed against the clairvoyant benchmark.
+        regrets[t] = clairvoyant_value - float(r_t.sum())
+
+    return TrialResult2(
+        rewards=rewards,
+        costs=costs,
+        regrets=np.cumsum(regrets),
+        actions=actions,
+        lambda_history=agent.get_histories()[0],
+        budget_history=agent.get_histories()[1],
+    )
+
+
+def _plot_cumulative_regret(results: Sequence[TrialResult2], title: str) -> None:
+    """Plot mean cumulative regret with a simple standard-error band."""
+    regret_mat = np.stack([r.regrets for r in results], axis=0)
+    mean_regret = regret_mat.mean(axis=0)
+    se_regret = regret_mat.std(axis=0) / np.sqrt(regret_mat.shape[0])
+    t_axis = np.arange(regret_mat.shape[1])
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(t_axis, mean_regret, color="steelblue", label="Mean cumulative regret")
+    ax.fill_between(
+        t_axis,
+        mean_regret - se_regret,
+        mean_regret + se_regret,
+        color="steelblue",
+        alpha=0.25,
+        label="± SE",
+    )
+    ax.set_title(title)
+    ax.set_xlabel("Round t")
+    ax.set_ylabel("Cumulative regret")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def _plot_cumulative_cost(results: Sequence[TrialResult2], budget_line: float, title: str) -> None:
+    """Plot mean cumulative cost and the budget reference line."""
+    cost_mat = np.stack([r.costs.sum(axis=1).cumsum() for r in results], axis=0)
+    mean_cost = cost_mat.mean(axis=0)
+    se_cost = cost_mat.std(axis=0) / np.sqrt(cost_mat.shape[0])
+    t_axis = np.arange(cost_mat.shape[1])
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(t_axis, mean_cost, color="darkorange", label="Mean cumulative cost")
+    ax.fill_between(
+        t_axis,
+        mean_cost - se_cost,
+        mean_cost + se_cost,
+        color="darkorange",
+        alpha=0.25,
+        label="± SE",
+    )
+    ax.axhline(budget_line, color="crimson", linestyle="--", label="Budget line")
+    ax.set_title(title)
+    ax.set_xlabel("Round t")
+    ax.set_ylabel("Cumulative cost")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def _plot_campaign_activity(results: Sequence[TrialResult2], title: str) -> None:
+    """Plot how often each campaign is selected over time."""
+    action_mat = np.stack([r.actions.astype(float) for r in results], axis=0)
+    mean_action = action_mat.mean(axis=0)  # (T, N)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    im = ax.imshow(mean_action.T, aspect="auto", origin="lower", cmap="viridis")
+    ax.set_title(title)
+    ax.set_xlabel("Round t")
+    ax.set_ylabel("Campaign i")
+    fig.colorbar(im, ax=ax, label="Selection frequency")
+    plt.tight_layout()
+    plt.show()
+
+
+def run_experiment_req2(
+    T: int = 2000,
+    n_trials: int = 20,
+    rho: float = 0.6,
+):
+    # Small toy instance, deliberately kept simple so the combinatorial search
+    # stays readable and can be inspected by hand.
+    bid_set = np.round(np.linspace(0.0, 1.0, 6), 2)
+    values = np.array([1.0, 0.9, 1.1], dtype=float)
+    dist_configs = [
+        {"type": "uniform", "low": 0.0, "high": 1.0},
+        {"type": "uniform", "low": 0.0, "high": 1.0},
+        {"type": "uniform", "low": 0.0, "high": 1.0},
+    ]
+    conflict_graph = np.array(
+        [
+            [0, 1, 0],
+            [1, 0, 1],
+            [0, 1, 0],
+        ],
+        dtype=int,
+    )
+
+    results = []
+    for seed in range(n_trials):
+        # Same seed => same stochastic environment for repeatable trials.
+        np.random.seed(seed)
+        env = MultiCampaignEnv(
+            bid_set=bid_set,
+            values=values,
+            dist_configs=dist_configs,
+            T=T,
+            conflict_graph=conflict_graph,
+            rho=rho,
+            correlation=0.25,
+        )
+        _, _, clairvoyant_value = compute_clairvoyant_mc(
+            bid_set=bid_set,
+            values=values,
+            dist_configs=dist_configs,
+            conflict_graph=conflict_graph,
+            rho=rho,
+            correlation=0.25,
+        )
+        agent = CombinatorialUCB1BiddingAgent(
+            bid_set=bid_set,
+            values=values,
+            conflict_graph=conflict_graph,
+            T=T,
+            rho=rho,
+        )
+        # Run one trial and store the trajectory.
+        results.append(run_single_trial2(env, agent, clairvoyant_value))
+
+    # Report one simple summary number so we can sanity-check the run.
+    mean_final_regret = float(np.mean([r.regrets[-1] for r in results]))
+    print(f"Requirement 2 complete. Mean final regret: {mean_final_regret:.2f}")
+
+
+    # Plots: regret, cost, and campaign activity.
+    _plot_cumulative_regret(results, title="Req 2 — Cumulative Regret")
+    _plot_cumulative_cost(
+        results,
+        budget_line=rho * T,
+        title="Req 2 — Cumulative Cost vs Budget",
+    )
+    _plot_campaign_activity(results, title="Req 2 — Campaign Activity Heatmap")
+    return results
 # ─────────────────────────────────────────────────────────────────────────────
 # 7.  Main entry point
 # ─────────────────────────────────────────────────────────────────────────────
@@ -862,6 +1062,22 @@ def main():
     print("\n" + "=" * 60)
     print("  Requirement 1 complete.")
     print("=" * 60 + "\n")
+
+    # ============================================================
+    # REQUIREMENT 2
+    # ============================================================
+    print("\n" + "#" * 60)
+    print("  REQUIREMENT 2 — Multiple Campaigns, Stochastic Environment")
+    print("#" * 60)
+    print("\n[1] Running Requirement 2 experiment ...")
+    run_experiment_req2(T=2_000, n_trials=20, rho=0.6)
+
+    print("\n" + "#" * 60)
+    print("  Requirement 2 complete.")
+    print("#" * 60 + "\n")
+
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

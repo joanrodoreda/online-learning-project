@@ -15,7 +15,7 @@ Design principles (enforced throughout):
     trial rather than resetting.
   • rewards ∈ [0, v],  costs ∈ [0, v].
 """
-
+from __future__ import annotations
 import numpy as np
 from scipy.optimize import linprog
 from scipy.stats import beta as beta_dist, norm as norm_dist
@@ -368,3 +368,256 @@ def validate_environment(v: float, bid_set: np.ndarray, dist_config: dict,
         f"[validate_environment] PASSED — {len(bid_set)} bids checked, "
         f"max error = {max_err:.4f}  (< 0.05)  over {n_rounds:,} rounds per bid."
     )
+"""
+environment_req2.py — Requirement 2: Multiple Campaigns, Stochastic Environment
+===============================================================================
+Provides:
+  • MultiCampaignEnv        — stochastic environment for multiple campaigns
+  • compute_campaign_means  — analytical mean reward per campaign/bid
+  • compute_clairvoyant_mc  — brute-force clairvoyant via Monte Carlo or
+                               exact marginal evaluation when independent
+
+Design principles:
+  • One round returns a vector of feedback, one entry per campaign.
+  • Competing bids are pre-generated at construction time for fair comparison.
+  • The joint distribution can be independent or correlated across campaigns.
+  • Only campaigns actually selected by the agent are observed (semi-bandit).
+"""
+
+
+
+import itertools
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+import numpy as np
+from scipy.stats import beta as beta_dist, norm as norm_dist
+
+
+@dataclass(frozen=True)
+class MultiCampaignSpec:
+    n_campaigns: int
+    bid_set: np.ndarray
+    values: np.ndarray
+    dist_configs: List[dict]
+    conflict_graph: np.ndarray
+    rho: float
+    correlation: float = 0.0
+
+
+class MultiCampaignEnv:
+    """
+    Stochastic first-price auction environment for multiple campaigns.
+
+    At each round t:
+      1. A joint vector m_t of competing bids is drawn.
+      2. The agent chooses a bid vector b_t and an activity mask.
+      3. Each selected campaign i wins iff b_{i,t} >= m_{i,t}.
+      4. Reward and cost are returned per campaign.
+
+    Feedback is semi-bandit:
+      - selected campaigns reveal win/reward/cost
+      - unselected campaigns remain unobserved
+    """
+
+    def __init__(
+        self,
+        bid_set: np.ndarray,
+        values: Sequence[float],
+        dist_configs: Sequence[dict],
+        T: int,
+        conflict_graph: np.ndarray,
+        rho: float,
+        correlation: float = 0.0,
+    ):
+        # Keep the experiment configuration around for the whole run.
+        self.bid_set = np.asarray(bid_set, dtype=float)
+        self.values = np.asarray(values, dtype=float)
+        self.dist_configs = list(dist_configs)
+        self.n_campaigns = len(self.values)
+        self.T = int(T)
+        self.conflict_graph = np.asarray(conflict_graph, dtype=int)
+        self.rho = float(rho)
+        self.correlation = float(correlation)
+        self.t = 0
+        # We sample the whole sequence up front so all agents face the same
+        # randomness during a trial.
+        self.competing_bids = self._pre_generate_joint_bids(self.T)
+
+    def _pre_generate_joint_bids(self, n: int) -> np.ndarray:
+        # Each row is one round, each column is one campaign.
+        samples = np.zeros((n, self.n_campaigns), dtype=float)
+        latent = None
+        if self.correlation > 0:
+            # If correlation is requested, use a latent Gaussian vector.
+            cov = np.full((self.n_campaigns, self.n_campaigns), self.correlation)
+            np.fill_diagonal(cov, 1.0)
+            latent = np.random.multivariate_normal(
+                mean=np.zeros(self.n_campaigns),
+                cov=cov,
+                size=n,
+            )
+
+        for i, cfg in enumerate(self.dist_configs):
+            kind = cfg["type"]
+            if kind == "uniform":
+                low, high = cfg["low"], cfg["high"]
+                if latent is None:
+                    # Independent Uniform draws.
+                    samples[:, i] = np.random.uniform(low, high, size=n)
+                else:
+                    # Transform latent Gaussian samples into uniforms.
+                    u = norm_dist.cdf(latent[:, i])
+                    samples[:, i] = low + u * (high - low)
+            elif kind == "beta":
+                a, b = cfg["a"], cfg["b"]
+                if latent is None:
+                    # Independent Beta draws.
+                    samples[:, i] = beta_dist.rvs(a, b, size=n) * self.values[i]
+                else:
+                    # Correlated Beta draws via inverse CDF.
+                    u = norm_dist.cdf(latent[:, i])
+                    samples[:, i] = beta_dist.ppf(u, a, b) * self.values[i]
+            elif kind == "normal":
+                loc, scale = cfg["loc"], cfg["scale"]
+                if latent is None:
+                    # Independent Normal draws.
+                    samples[:, i] = np.random.normal(loc, scale, size=n)
+                else:
+                    # Correlated Normal draws from the latent vector.
+                    samples[:, i] = loc + scale * latent[:, i]
+            else:
+                raise ValueError(f"Unknown distribution type '{kind}'.")
+
+        # Force bids back into the valid interval [0, campaign value].
+        return np.clip(samples, 0.0, self.values).astype(float)
+
+    def round(self, bid_vector: Sequence[float], active_mask: Sequence[bool]):
+        # One round = one joint auction vector.
+        if self.t >= self.T:
+            raise RuntimeError("Environment exhausted.")
+
+        bid_vector = np.asarray(bid_vector, dtype=float)
+        active_mask = np.asarray(active_mask, dtype=bool)
+        m_t = self.competing_bids[self.t]
+        # Only active campaigns can win.
+        win_t = (bid_vector >= m_t) & active_mask
+        # Reward is utility only when we win.
+        reward_t = (self.values - bid_vector) * win_t
+        # Cost is actually paid only when we win.
+        cost_t = bid_vector * win_t
+        self.t += 1
+        return win_t, reward_t, cost_t
+
+    def reset(self) -> None:
+        self.t = 0
+
+
+def compute_campaign_means(
+    bid_set: np.ndarray,
+    values: Sequence[float],
+    dist_configs: Sequence[dict],
+) -> np.ndarray:
+    bids = np.asarray(bid_set, dtype=float)
+    values = np.asarray(values, dtype=float)
+    K = len(bids)
+    N = len(values)
+    means = np.zeros((N, K), dtype=float)
+
+    for i, cfg in enumerate(dist_configs):
+        kind = cfg["type"]
+        if kind == "uniform":
+            lo, hi = cfg["low"], cfg["high"]
+            F = np.clip((bids - lo) / (hi - lo), 0.0, 1.0)
+        elif kind == "beta":
+            F = beta_dist.cdf(bids / values[i], cfg["a"], cfg["b"])
+        elif kind == "normal":
+            F = norm_dist.cdf(bids, loc=cfg["loc"], scale=cfg["scale"])
+            F = np.clip(F, 0.0, 1.0)
+        else:
+            raise ValueError(f"Unknown distribution type '{kind}'.")
+        means[i] = (values[i] - bids) * F
+    return means
+
+
+def _campaign_cdf(bids: np.ndarray, value: float, cfg: dict) -> np.ndarray:
+    kind = cfg["type"]
+    if kind == "uniform":
+        lo, hi = cfg["low"], cfg["high"]
+        return np.clip((bids - lo) / (hi - lo), 0.0, 1.0)
+    if kind == "beta":
+        return beta_dist.cdf(bids / value, cfg["a"], cfg["b"])
+    if kind == "normal":
+        return np.clip(norm_dist.cdf(bids, loc=cfg["loc"], scale=cfg["scale"]), 0.0, 1.0)
+    raise ValueError(f"Unknown distribution type '{kind}'.")
+
+
+def _is_independent(subset: Tuple[int, ...], conflict_graph: np.ndarray) -> bool:
+    for i, u in enumerate(subset):
+        for v in subset[i + 1 :]:
+            if conflict_graph[u, v] or conflict_graph[v, u]:
+                return False
+    return True
+
+
+def enumerate_feasible_sets(conflict_graph: np.ndarray) -> List[Tuple[int, ...]]:
+    n = conflict_graph.shape[0]
+    feasible = [tuple()]
+    for r in range(1, n + 1):
+        for subset in itertools.combinations(range(n), r):
+            if _is_independent(subset, conflict_graph):
+                feasible.append(subset)
+    return feasible
+
+
+def compute_clairvoyant_mc(
+    bid_set: np.ndarray,
+    values: Sequence[float],
+    dist_configs: Sequence[dict],
+    conflict_graph: np.ndarray,
+    rho: float,
+    correlation: float = 0.0,
+    mc_samples: int = 5000,
+) -> Tuple[Tuple[int, ...], np.ndarray, float]:
+    """
+    Return the best feasible campaign subset, its bid indices, and value.
+
+    The action space is:
+      - choose an independent set of campaigns
+      - choose one bid per selected campaign
+      - total expected cost <= rho
+    """
+    bids = np.asarray(bid_set, dtype=float)
+    values = np.asarray(values, dtype=float)
+    means = compute_campaign_means(bid_set, values, dist_configs)
+    feasible_sets = enumerate_feasible_sets(np.asarray(conflict_graph, dtype=int))
+
+    best_subset: Tuple[int, ...] = tuple()
+    best_bid_idx = np.zeros(len(values), dtype=int)
+    best_value = -np.inf
+
+    for subset in feasible_sets:
+        if not subset:
+            if best_value < 0:
+                best_value = 0.0
+            continue
+
+        choices = [range(len(bids)) for _ in subset]
+        for bid_choice in itertools.product(*choices):
+            cost = 0.0
+            reward = 0.0
+            for local_pos, i in enumerate(subset):
+                b_idx = bid_choice[local_pos]
+                win_prob = float(_campaign_cdf(np.array([bids[b_idx]]), values[i], dist_configs[i])[0])
+                cost += bids[b_idx] * win_prob
+                reward += means[i, b_idx]
+            if cost <= rho and reward > best_value:
+                best_value = float(reward)
+                best_subset = tuple(subset)
+                best_bid_idx = np.zeros(len(values), dtype=int)
+                for local_pos, i in enumerate(subset):
+                    best_bid_idx[i] = int(bid_choice[local_pos])
+
+    if best_value == -np.inf:
+        best_value = 0.0
+    return best_subset, best_bid_idx, best_value

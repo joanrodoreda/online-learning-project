@@ -28,6 +28,11 @@ from __future__ import annotations
 import numpy as np
 from config import UCB_EXPLORATION_FACTOR
 
+import itertools
+from dataclasses import dataclass
+from typing import List, Sequence, Tuple
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 0.  Abstract base class  (course convention)
@@ -504,3 +509,237 @@ AGENT_REGISTRY: dict = {
     "UCB1":      UCB1BiddingAgent,
     "BudgetUCB1": BudgetUCB1BiddingAgent,
 }
+"""
+agents_req2.py — Requirement 2: Multiple Campaigns, Combinatorial UCB
+======================================================================
+Implements a small, readable Combinatorial-UCB agent for multiple campaigns
+with a budget constraint.
+"""
+
+
+class CombinatorialAgent:
+    def __init__(self):
+        pass
+
+    def pull_action(self):
+        raise NotImplementedError
+
+    def update(self, reward_vec, cost_vec):
+        raise NotImplementedError
+
+
+def enumerate_independent_sets(conflict_graph: np.ndarray) -> List[Tuple[int, ...]]:
+    """
+    Return every subset of campaigns that does not contain a conflict.
+
+    This is the "combinatorial" part of the problem: we do not choose a
+    single arm, but a whole set of campaigns that can be played together.
+    For small N, brute-force enumeration is the clearest way to do it.
+    """
+    n = conflict_graph.shape[0]
+    feasible = [tuple()]
+    for r in range(1, n + 1):
+        # itertools.combinations gives all subsets of size r.
+        for subset in itertools.combinations(range(n), r):
+            ok = True
+            # Check that no pair inside the subset is connected by an edge.
+            for i, u in enumerate(subset):
+                for v in subset[i + 1 :]:
+                    if conflict_graph[u, v] or conflict_graph[v, u]:
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if ok:
+                feasible.append(subset)
+    return feasible
+
+
+class CombinatorialUCB1BiddingAgent(CombinatorialAgent):
+    """
+    Combinatorial UCB with a budget constraint.
+
+    Action:
+      - choose an independent set of campaigns
+      - choose one bid per selected campaign
+      - unselected campaigns receive bid 0
+    """
+
+    label: str = "Combinatorial-UCB"
+
+    def __init__(
+        self,
+        bid_set: np.ndarray,
+        values: Sequence[float],
+        conflict_graph: np.ndarray,
+        T: int,
+        rho: float,
+        eta: float = None,
+    ):
+        super().__init__()
+        # Store the problem instance in numpy form for vectorized operations.
+        self.bid_set = np.asarray(bid_set, dtype=float)
+        self.values = np.asarray(values, dtype=float)
+        self.n_campaigns = len(self.values)
+        self.K = len(self.bid_set)
+        self.conflict_graph = np.asarray(conflict_graph, dtype=int)
+        self.T = int(T)
+        self.rho = float(rho)
+        self.eta = float(eta) if eta is not None else 1.0 / np.sqrt(T)
+
+        # λ_t is the dual variable: if we overspend, it goes up and makes
+        # expensive actions less attractive.
+        self.lambda_t = 0.0
+        # Remaining budget in "real" units, used as a guardrail.
+        self.budget_remaining = self.rho * T
+        self.t = 0
+
+        # N[i, b] = how many times campaign i was played with bid b.
+        self.N = np.zeros((self.n_campaigns, self.K), dtype=float)
+        # Empirical mean reward for each campaign-bid pair.
+        self.mean_rewards = np.zeros((self.n_campaigns, self.K), dtype=float)
+        # Empirical mean cost for each campaign-bid pair.
+        self.mean_costs = np.zeros((self.n_campaigns, self.K), dtype=float)
+        # Save the last action so update() knows what to update.
+        self.last_bids = np.zeros(self.n_campaigns, dtype=float)
+        self.last_active = np.zeros(self.n_campaigns, dtype=bool)
+        # Precompute all feasible subsets once.
+        self.independent_sets = enumerate_independent_sets(self.conflict_graph)
+
+        # Trajectories useful for debugging and plotting.
+        self.lambda_history = np.zeros(self.T, dtype=float)
+        self.budget_history = np.zeros(self.T, dtype=float)
+
+    def _ucb_reward(self) -> np.ndarray:
+        """
+        Optimistic estimate of the reward.
+
+        mean + confidence_radius.
+        This is the standard UCB trick: be optimistic about uncertain pairs.
+        """
+        return self.mean_rewards + np.sqrt(
+            2.0 * np.log(max(self.T, 2)) / np.maximum(self.N, 1.0)
+        )
+
+    def _ucb_cost(self) -> np.ndarray:
+        """
+        Optimistic estimate of the cost.
+
+        We keep a UCB for cost as well, because the budget penalty should be
+        applied to an optimistic estimate of spending, not only to reward.
+        """
+        return self.mean_costs + np.sqrt(
+            2.0 * np.log(max(self.T, 2)) / np.maximum(self.N, 1.0)
+        )
+
+    def pull_action(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Choose the next action.
+
+        Returns:
+            bids:   one bid per campaign
+            active:  True for campaigns we actually play
+        """
+        # Store the state before choosing the next action.
+        if self.t < self.T:
+            self.lambda_history[self.t] = self.lambda_t
+            self.budget_history[self.t] = self.budget_remaining
+
+        # If budget is gone, stop bidding altogether.
+        if self.budget_remaining <= 1e-9:
+            self.last_bids[:] = 0.0
+            self.last_active[:] = False
+            return self.last_bids.copy(), self.last_active.copy()
+
+        # Very early rounds: play each campaign once so we collect an initial
+        # sample before trusting UCB.
+        if self.t < self.n_campaigns:
+            bids = np.zeros(self.n_campaigns, dtype=float)
+            active = np.zeros(self.n_campaigns, dtype=bool)
+            # We start with the second bid in the grid when possible, just to
+            # avoid the trivial zero-bid opt-out during initialization.
+            bids[self.t] = self.bid_set[min(1, self.K - 1)]
+            active[self.t] = True
+            self.last_bids = bids
+            self.last_active = active
+            return bids.copy(), active.copy()
+
+        # Build optimistic tables for reward and cost.
+        ucb_r = self._ucb_reward()
+        ucb_c = self._ucb_cost()
+
+        # We search over all independent sets and keep the one with best score.
+        best_score = -np.inf
+        best_bids = np.zeros(self.n_campaigns, dtype=float)
+        best_active = np.zeros(self.n_campaigns, dtype=bool)
+
+        for subset in self.independent_sets:
+            # Start from an empty action and fill only the campaigns in subset.
+            bids = np.zeros(self.n_campaigns, dtype=float)#bid to assign to each campaign
+            active = np.zeros(self.n_campaigns, dtype=bool)
+            score = 0.0
+            for i in subset:
+                # For campaign i, evaluate every bid:
+                # optimistic reward - λ * optimistic cost.
+                bid_scores = ucb_r[i] - self.lambda_t * ucb_c[i]#ignoring term+lambda rho, since its constant
+                b_idx = int(np.argmax(bid_scores))
+                bids[i] = self.bid_set[b_idx]
+                active[i] = True
+                score += float(bid_scores[b_idx])
+
+            # Keep the highest-scoring feasible subset.
+            if score > best_score:
+                best_score = score
+                best_bids = bids
+                best_active = active
+
+        self.last_bids = best_bids
+        self.last_active = best_active
+        return best_bids.copy(), best_active.copy()
+
+    def update(self, reward_vec, cost_vec):
+        """
+        Update empirical means after observing the realized feedback.
+
+        Only the campaigns that were active in the chosen subset are updated.
+        This is exactly the semi-bandit idea: we learn from the campaigns we
+        actually played, not from the ones we skipped.
+        """
+        reward_vec = np.asarray(reward_vec, dtype=float)
+        cost_vec = np.asarray(cost_vec, dtype=float)
+
+        # Update the statistics of the selected campaign-bid pairs.
+        for i in np.where(self.last_active)[0]:
+            b = self.last_bids[i]
+            # Map the floating bid back to an index in bid_set.
+            b_idx = int(np.argmin(np.abs(self.bid_set - b)))
+            self.N[i, b_idx] += 1.0
+
+            # Normalize by campaign value so rewards live roughly in [0,1].
+            self.mean_rewards[i, b_idx] += (
+                reward_vec[i] / max(self.values[i], 1e-12) - self.mean_rewards[i, b_idx]
+            ) / self.N[i, b_idx]
+
+            # Same normalization idea for cost, so reward and cost are on
+            # comparable scales inside the Lagrangian.
+            self.mean_costs[i, b_idx] += (
+                cost_vec[i] / max(self.values[i], 1e-12) - self.mean_costs[i, b_idx]
+            ) / self.N[i, b_idx]
+
+        # Budget bookkeeping: subtract the realized cost from the remaining budget.
+        total_cost = float(cost_vec.sum())
+        self.budget_remaining -= total_cost
+
+        # Dual update:
+        # - if we spent more than the per-round budget rho, λ increases
+        # - otherwise λ decreases or stays small
+        self.lambda_t = float(np.clip(
+            self.lambda_t + self.eta * (total_cost - self.rho),
+            0.0,
+            1.0 / max(self.rho, 1e-12),
+        ))
+        self.t += 1
+
+    def get_histories(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return the stored lambda/budget trajectories for the current trial."""
+        return self.lambda_history.copy(), self.budget_history.copy()
