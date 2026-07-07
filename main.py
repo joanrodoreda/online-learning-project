@@ -943,17 +943,19 @@ def run_experiment_req2(
     # Small toy instance, deliberately kept simple so the combinatorial search
     # stays readable and can be inspected by hand.
     bid_set = np.round(np.linspace(0.0, 1.0, 6), 2)
-    values = np.array([1.0, 0.9, 1.1], dtype=float)
+    values = np.array([1.0, 0.9, 1.1,1.0], dtype=float)
     dist_configs = [
         {"type": "uniform", "low": 0.0, "high": 1.0},
-        {"type": "uniform", "low": 0.0, "high": 1.0},
-        {"type": "uniform", "low": 0.0, "high": 1.0},
+        {"type": "beta", "a": 2, "b": 5},
+        {"type": "normal",     "loc": 0.5, "scale": 0.2},
+        {"type": "normal", "loc": 0.5, "scale": 0.2},
     ]
     conflict_graph = np.array(
         [
-            [0, 1, 0],
-            [1, 0, 1],
-            [0, 1, 0],
+            [0, 0, 1, 1],
+            [0, 0, 1, 0],
+            [1, 1, 0, 0],
+            [1, 0, 0, 0],
         ],
         dtype=int,
     )
@@ -1008,60 +1010,60 @@ def run_experiment_req2(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    """
-    Run all Requirement 1 experiments in sequence.
-
-    ┌─────────────────────────────────────────────────────────────────────┐
-    │  Step 0: Environment validation                                     │
-    │  Step 1: Experiment A — UCB1 vs. baselines (no budget)             │
-    │  Step 2: Experiment B — budget constraint effect                    │
-    │  Step 3: Experiment C — regret vs. T scaling (log-log)             │
-    └─────────────────────────────────────────────────────────────────────┘
-    """
-    print("\n" + "=" * 60)
-    print("  REQUIREMENT 1 — Single Campaign, Stochastic Environment")
-    print("=" * 60)
-
-    dist_config = DIST_CONFIGS[DEFAULT_DIST]
-    print(f"\n  Distribution : {dist_config['label']}")
-    print(f"  T            : {T}")
-    print(f"  N_TRIALS     : {N_TRIALS}")
-    print(f"  K (bids)     : {K},  B = {BID_SET}")
-    print(f"  V            : {V}")
-    print(f"  RHO_MODERATE : {RHO_MODERATE}  (B = {BUDGET_MODERATE:.0f})")
-    print(f"  RHO_TIGHT    : {RHO_TIGHT}  (B = {BUDGET_TIGHT:.0f})")
-    print(f"  ETA_DUAL     : {ETA_DUAL:.5f}")
-    print(f"  T0_ETC       : {T0_ETC}")
-
-    # ── Step 0: Validate environment ──────────────────────────────────────────
-    print("\n[0] Validating environment ...")
-    validate_environment(V, BID_SET, dist_config, n_rounds=5_000)
-
-    # ── Step 1: Experiment A — all three distributions ───────────────────────
-    print("\n[1a] Experiment A — Uniform(0,1) distribution")
-    run_experiment_A(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
-
-    print("\n[1b] Experiment A — Beta(2,5) distribution")
-    run_experiment_A(dist_config=DIST_CONFIGS["beta"], T=T, n_trials=N_TRIALS)
-
-    print("\n[1c] Experiment A — Truncated Normal(0.5, 0.2) distribution")
-    run_experiment_A(dist_config=DIST_CONFIGS["normal"], T=T, n_trials=N_TRIALS)
-
-    # ── Step 2: Experiment B — budget constraint (uniform, canonical case) ───
-    print("\n[2] Experiment B — Budget constraint effect  [Uniform(0,1)]")
-    run_experiment_B(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
-
-    # ── Step 3: Experiment C — regret scaling ────────────────────────────────
-    print("\n[3] Experiment C — Regret scaling vs. T  [Uniform(0,1)]")
-    run_experiment_C(
-        dist_config = DIST_CONFIGS["uniform"],
-        T_values    = [500, 1_000, 2_000, 5_000, 10_000],
-        n_trials    = 20,
-    )
-
-    print("\n" + "=" * 60)
-    print("  Requirement 1 complete.")
-    print("=" * 60 + "\n")
+    # """
+    # Run all Requirement 1 experiments in sequence.
+    #
+    # ┌─────────────────────────────────────────────────────────────────────┐
+    # │  Step 0: Environment validation                                     │
+    # │  Step 1: Experiment A — UCB1 vs. baselines (no budget)             │
+    # │  Step 2: Experiment B — budget constraint effect                    │
+    # │  Step 3: Experiment C — regret vs. T scaling (log-log)             │
+    # └─────────────────────────────────────────────────────────────────────┘
+    # """
+    # print("\n" + "=" * 60)
+    # print("  REQUIREMENT 1 — Single Campaign, Stochastic Environment")
+    # print("=" * 60)
+    #
+    # dist_config = DIST_CONFIGS[DEFAULT_DIST]
+    # print(f"\n  Distribution : {dist_config['label']}")
+    # print(f"  T            : {T}")
+    # print(f"  N_TRIALS     : {N_TRIALS}")
+    # print(f"  K (bids)     : {K},  B = {BID_SET}")
+    # print(f"  V            : {V}")
+    # print(f"  RHO_MODERATE : {RHO_MODERATE}  (B = {BUDGET_MODERATE:.0f})")
+    # print(f"  RHO_TIGHT    : {RHO_TIGHT}  (B = {BUDGET_TIGHT:.0f})")
+    # print(f"  ETA_DUAL     : {ETA_DUAL:.5f}")
+    # print(f"  T0_ETC       : {T0_ETC}")
+    #
+    # # ── Step 0: Validate environment ──────────────────────────────────────────
+    # print("\n[0] Validating environment ...")
+    # validate_environment(V, BID_SET, dist_config, n_rounds=5_000)
+    #
+    # # ── Step 1: Experiment A — all three distributions ───────────────────────
+    # print("\n[1a] Experiment A — Uniform(0,1) distribution")
+    # run_experiment_A(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
+    #
+    # print("\n[1b] Experiment A — Beta(2,5) distribution")
+    # run_experiment_A(dist_config=DIST_CONFIGS["beta"], T=T, n_trials=N_TRIALS)
+    #
+    # print("\n[1c] Experiment A — Truncated Normal(0.5, 0.2) distribution")
+    # run_experiment_A(dist_config=DIST_CONFIGS["normal"], T=T, n_trials=N_TRIALS)
+    #
+    # # ── Step 2: Experiment B — budget constraint (uniform, canonical case) ───
+    # print("\n[2] Experiment B — Budget constraint effect  [Uniform(0,1)]")
+    # run_experiment_B(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
+    #
+    # # ── Step 3: Experiment C — regret scaling ────────────────────────────────
+    # print("\n[3] Experiment C — Regret scaling vs. T  [Uniform(0,1)]")
+    # run_experiment_C(
+    #     dist_config = DIST_CONFIGS["uniform"],
+    #     T_values    = [500, 1_000, 2_000, 5_000, 10_000],
+    #     n_trials    = 20,
+    # )
+    #
+    # print("\n" + "=" * 60)
+    # print("  Requirement 1 complete.")
+    # print("=" * 60 + "\n")
 
     # ============================================================
     # REQUIREMENT 2
