@@ -1831,6 +1831,52 @@ def run_full_experiment(req_number):
 - Convergence speed slower for more campaigns (need more samples to learn all)
 - Algorithm should still handle up to 6 campaigns efficiently (within combinatorial solver capacity)
 
+#### Experiment 2.5: Skewed Distribution Stress Test
+
+**Purpose:** Check how the learner reacts when each campaign has a different
+distributional shape and a different value scale.
+
+**Environment:**
+- T = 5000
+- N = 4 campaigns
+- Values: [1.0, 1.2, 0.8, 1.5]
+- Bid set: [0, 0.1, 0.25, 0.5, 0.75, 1.0]
+- Competing bids:
+  - Campaign 1: Uniform(0, 1)
+  - Campaign 2: Beta(2, 5)
+  - Campaign 3: Normal(0.55, 0.15), clipped to [0, 1]
+  - Campaign 4: Beta(5, 2)
+- Conflict graph: path (1-2), (2-3), (3-4)
+- Budget: 1.8T
+- n_trials = 25
+
+**What to report:**
+- cumulative regret
+- cumulative cost vs budget
+- per-campaign activity heatmap
+
+#### Experiment 2.6: Budget Tightness Sweep
+
+**Purpose:** Show the effect of increasingly strict budget limits.
+
+**Environment:**
+- T = 5000
+- N = 3 campaigns
+- Values: [1.0, 1.0, 1.0]
+- Bid set: [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+- Competing bids: Uniform(0, 1)
+- Conflict graph: complete graph
+- Budgets:
+  - 0.8T
+  - 1.2T
+  - 1.6T
+- n_trials = 30
+
+**Expected trend:**
+- tighter budgets -> fewer active campaigns
+- larger regret under stronger budget pressure
+- cost plot should cross the budget line less often as the policy adapts
+
 ---
 
 ### Requirement 3: Primal-Dual Best-of-Both-Worlds

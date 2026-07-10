@@ -760,6 +760,57 @@ The runner now produces three explanatory plots, in the same spirit as Requireme
 These plots help visualize whether the algorithm is learning good bids,
 staying inside budget, and selecting campaigns consistently over time.
 
+### Additional Requirement 2 Experiments
+
+If you want to stress-test the same implementation under different stochastic
+conditions, these two variants are easy to report alongside the base experiment:
+
+#### Experiment 2.5: Skewed Distributions Across Campaigns
+
+**Purpose:** Check whether the policy adapts when each campaign has a different
+bid landscape.
+
+**Environment:**
+- T = 5000 rounds
+- N = 4 campaigns
+- Campaign values: v = [1.0, 1.2, 0.8, 1.5]
+- Bid set B = [0, 0.1, 0.25, 0.5, 0.75, 1.0]
+- Competing bids:
+  - Campaign 1: Uniform(0, 1)
+  - Campaign 2: Beta(2, 5)
+  - Campaign 3: Normal(0.55, 0.15), clipped to [0, 1]
+  - Campaign 4: Beta(5, 2)
+- Conflict graph: path graph (1-2), (2-3), (3-4)
+- Budget: B = 1.8T
+- n_trials = 25
+
+**Expected Results:**
+- The agent should favor campaigns with heavier mass in profitable bid regions
+- Campaign 4 should often dominate when the feasible set allows it
+- The path graph should create visible competition between neighboring campaigns
+
+#### Experiment 2.6: Tight Budget Sensitivity
+
+**Purpose:** Measure how performance changes when the budget becomes the main bottleneck.
+
+**Environment:**
+- T = 5000 rounds
+- N = 3 campaigns
+- Campaign values: v = [1.0, 1.0, 1.0]
+- Bid set B = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+- Competing bids: Uniform(0, 1) per campaign
+- Conflict graph: complete graph
+- Budget sweep:
+  - B = 0.8T
+  - B = 1.2T
+  - B = 1.6T
+- n_trials = 30
+
+**Expected Results:**
+- Lower budgets should force the learner into more conservative bidding
+- Regret should increase as the budget tightens
+- The cost plot should make the budget trade-off immediately visible
+
 ### Presentation Summary
 
 - Requirement 1 learns a single optimal bid.

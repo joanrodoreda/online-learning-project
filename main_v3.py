@@ -27,27 +27,35 @@ All plots are shown inline.  Set SAVE_FIGURES = True to write PNGs.
 
 from __future__ import annotations
 
-import numpy as np
+import importlib.util
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Sequence, Tuple, Type
+
+REQUIRED_PACKAGES = {
+    "numpy": "numpy",
+    "matplotlib": "matplotlib",
+    "scipy": "scipy",
+}
+
+missing_packages = [pkg for module_name, pkg in REQUIRED_PACKAGES.items() if importlib.util.find_spec(module_name) is None]
+if missing_packages:
+    missing_list = " ".join(missing_packages)
+    print("Missing required dependencies:", ", ".join(missing_packages))
+    print("Install them with:")
+    print(f"    pip install {missing_list}")
+    raise SystemExit(1)
+
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
-from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Type
-
-
-from dataclasses import dataclass
-from typing import Dict, Sequence
-
-import json
-from pathlib import Path
-
 import numpy as np
-import matplotlib.pyplot as plt
 
-from agents import CombinatorialUCB1BiddingAgent
-from environment import MultiCampaignEnv, compute_clairvoyant_mc
+from agents_v3 import CombinatorialUCB1BiddingAgent
+from environment_v3 import MultiCampaignEnv, compute_clairvoyant_mc
 
 # ── Project modules ──────────────────────────────────────────────────────────
-from config import (
+from config_v3 import (
     V, BID_SET, K, T, N_TRIALS, RANDOM_SEED_START,
     RHO_MODERATE, RHO_TIGHT, BUDGET_MODERATE, BUDGET_TIGHT,
     ETA_DUAL, DIST_CONFIGS, DEFAULT_DIST, T0_ETC,
@@ -55,13 +63,13 @@ from config import (
     FIGURE_SIZE, UNCERTAINTY_ALPHA, AGENT_COLORS,
     OPT_OUT_ARM_IDX,
 )
-from environment import (
+from environment_v3 import (
     SingleCampaignEnv,
     compute_true_arm_means,
     compute_clairvoyant,
     validate_environment,
 )
-from agents import (
+from agents_v3 import (
     Agent,
     RandomBiddingAgent,
     GreedyBiddingAgent,
@@ -816,13 +824,15 @@ def run_experiment_C(
         filename       = "exp_C_scaling_budget",
     )
 
+
+
 """
 main_req2.py — Requirement 2 orchestration
 ==========================================
 Standalone runner for the multiple-campaign stochastic environment.
 """
 
-
+#CONTAINER CLASS TO STORE THE RESULTS OF A SINGLE TRIAL (USED ALSO FOR REQUIREMENT 3)
 @dataclass
 class TrialResult2:
     rewards: np.ndarray
@@ -1010,60 +1020,60 @@ def run_experiment_req2(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    # """
-    # Run all Requirement 1 experiments in sequence.
-    #
-    # ┌─────────────────────────────────────────────────────────────────────┐
-    # │  Step 0: Environment validation                                     │
-    # │  Step 1: Experiment A — UCB1 vs. baselines (no budget)             │
-    # │  Step 2: Experiment B — budget constraint effect                    │
-    # │  Step 3: Experiment C — regret vs. T scaling (log-log)             │
-    # └─────────────────────────────────────────────────────────────────────┘
-    # """
-    # print("\n" + "=" * 60)
-    # print("  REQUIREMENT 1 — Single Campaign, Stochastic Environment")
-    # print("=" * 60)
-    #
-    # dist_config = DIST_CONFIGS[DEFAULT_DIST]
-    # print(f"\n  Distribution : {dist_config['label']}")
-    # print(f"  T            : {T}")
-    # print(f"  N_TRIALS     : {N_TRIALS}")
-    # print(f"  K (bids)     : {K},  B = {BID_SET}")
-    # print(f"  V            : {V}")
-    # print(f"  RHO_MODERATE : {RHO_MODERATE}  (B = {BUDGET_MODERATE:.0f})")
-    # print(f"  RHO_TIGHT    : {RHO_TIGHT}  (B = {BUDGET_TIGHT:.0f})")
-    # print(f"  ETA_DUAL     : {ETA_DUAL:.5f}")
-    # print(f"  T0_ETC       : {T0_ETC}")
-    #
-    # # ── Step 0: Validate environment ──────────────────────────────────────────
-    # print("\n[0] Validating environment ...")
-    # validate_environment(V, BID_SET, dist_config, n_rounds=5_000)
-    #
-    # # ── Step 1: Experiment A — all three distributions ───────────────────────
-    # print("\n[1a] Experiment A — Uniform(0,1) distribution")
-    # run_experiment_A(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
-    #
-    # print("\n[1b] Experiment A — Beta(2,5) distribution")
-    # run_experiment_A(dist_config=DIST_CONFIGS["beta"], T=T, n_trials=N_TRIALS)
-    #
-    # print("\n[1c] Experiment A — Truncated Normal(0.5, 0.2) distribution")
-    # run_experiment_A(dist_config=DIST_CONFIGS["normal"], T=T, n_trials=N_TRIALS)
-    #
-    # # ── Step 2: Experiment B — budget constraint (uniform, canonical case) ───
-    # print("\n[2] Experiment B — Budget constraint effect  [Uniform(0,1)]")
-    # run_experiment_B(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
-    #
-    # # ── Step 3: Experiment C — regret scaling ────────────────────────────────
-    # print("\n[3] Experiment C — Regret scaling vs. T  [Uniform(0,1)]")
-    # run_experiment_C(
-    #     dist_config = DIST_CONFIGS["uniform"],
-    #     T_values    = [500, 1_000, 2_000, 5_000, 10_000],
-    #     n_trials    = 20,
-    # )
-    #
-    # print("\n" + "=" * 60)
-    # print("  Requirement 1 complete.")
-    # print("=" * 60 + "\n")
+    """
+    Run all Requirement 1 experiments in sequence.
+
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  Step 0: Environment validation                                     │
+    │  Step 1: Experiment A — UCB1 vs. baselines (no budget)             │
+    │  Step 2: Experiment B — budget constraint effect                    │
+    │  Step 3: Experiment C — regret vs. T scaling (log-log)             │
+    └─────────────────────────────────────────────────────────────────────┘
+    """
+    print("\n" + "=" * 60)
+    print("  REQUIREMENT 1 — Single Campaign, Stochastic Environment")
+    print("=" * 60)
+
+    dist_config = DIST_CONFIGS[DEFAULT_DIST]
+    print(f"\n  Distribution : {dist_config['label']}")
+    print(f"  T            : {T}")
+    print(f"  N_TRIALS     : {N_TRIALS}")
+    print(f"  K (bids)     : {K},  B = {BID_SET}")
+    print(f"  V            : {V}")
+    print(f"  RHO_MODERATE : {RHO_MODERATE}  (B = {BUDGET_MODERATE:.0f})")
+    print(f"  RHO_TIGHT    : {RHO_TIGHT}  (B = {BUDGET_TIGHT:.0f})")
+    print(f"  ETA_DUAL     : {ETA_DUAL:.5f}")
+    print(f"  T0_ETC       : {T0_ETC}")
+
+    # ── Step 0: Validate environment ──────────────────────────────────────────
+    print("\n[0] Validating environment ...")
+    validate_environment(V, BID_SET, dist_config, n_rounds=5_000)
+
+    # ── Step 1: Experiment A — all three distributions ───────────────────────
+    print("\n[1a] Experiment A — Uniform(0,1) distribution")
+    run_experiment_A(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
+
+    print("\n[1b] Experiment A — Beta(2,5) distribution")
+    run_experiment_A(dist_config=DIST_CONFIGS["beta"], T=T, n_trials=N_TRIALS)
+
+    print("\n[1c] Experiment A — Truncated Normal(0.5, 0.2) distribution")
+    run_experiment_A(dist_config=DIST_CONFIGS["normal"], T=T, n_trials=N_TRIALS)
+
+    # ── Step 2: Experiment B — budget constraint (uniform, canonical case) ───
+    print("\n[2] Experiment B — Budget constraint effect  [Uniform(0,1)]")
+    run_experiment_B(dist_config=DIST_CONFIGS["uniform"], T=T, n_trials=N_TRIALS)
+
+    # ── Step 3: Experiment C — regret scaling ────────────────────────────────
+    print("\n[3] Experiment C — Regret scaling vs. T  [Uniform(0,1)]")
+    run_experiment_C(
+        dist_config = DIST_CONFIGS["uniform"],
+        T_values    = [500, 1_000, 2_000, 5_000, 10_000],
+        n_trials    = 20,
+    )
+
+    print("\n" + "=" * 60)
+    print("  Requirement 1 complete.")
+    print("=" * 60 + "\n")
 
     # ============================================================
     # REQUIREMENT 2
@@ -1085,3 +1095,356 @@ def main():
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REQUIREMENT 3 — Best-of-both-worlds: primal-dual vs Combinatorial-UCB
+# ═════════════════════════════════════════════════════════════════════════════
+# Experiment design:
+#   World A — STOCHASTIC:      run the Hedge/PrimalDual agent and the Combinatorial-UCB agent on a stationary
+#                              stochasticmulti-campaign environment.  Both agents have full feedback
+#                              Benchmark: compute_clairvoyant_mc (expectation) - clairvoyant of Requirement 2.
+#   World B — NON-STATIONARY:  NonStationaryMultiCampaignEnv (regimes change
+#                              every few rounds).  
+#                               Benchmark: best FIXED
+#                              feasible action IN HINDSIGHT on the realized
+#                              sequence (compute_hindsight_clairvoyant),
+#                              recomputed PER TRIAL.
+#   
+# In both worlds we run, on identical seeds/noise:
+#     • PrimalDualHedgeBiddingAgent   (Requirement 3 — relies on full feedback)
+#     • CombinatorialUCB1BiddingAgent (Requirement 2 — relies onsemi-bandit)
+#   Expected story: comparable in World A; UCB degrades in World B while the
+#                   primal-dual method keeps sublinear regret in world B, hence best of both worlds.
+
+from agents_v3 import PrimalDualHedgeBiddingAgent #import our agent's class
+from environment_v3 import (
+    NonStationaryMultiCampaignEnv,
+    compute_hindsight_clairvoyant,
+) #import the non-stationary environment class and the clairvoyant function to compute the clairvoyant values over the rounds
+from config_v3 import NS_CHANGE_EVERY, LAMBDA_MAX_REQ3 #import necessary configurations from the config file
+
+
+#### METHOD TO RUN ONE FULL SIMULATION FOR ONE AGENT
+def run_single_trial3(
+    env: MultiCampaignEnv,
+    agent,
+    clairvoyant_value: float, #the per round reward of the considered clairvoyant benchmark
+) -> TrialResult2:
+    """
+    INPUT PARAMS: environment (stationary stochastic or non-stationary), 
+                  agent (either PrimalDualHedgeBiddingAgent or CombinatorialUCB1BiddingAgent), 
+                  clairvoyant_value (the clairvoyant value for the environment)
+    
+    OUTPUT: TrialResult2 object containing the rewards, costs, regrets, actions, lambda_history, and budget_history for the trial
+    
+    One trial with FULL FEEDBACK routing.
+
+    Works for both agents:
+      • PrimalDualHedgeBiddingAgent   — update(r, c, m)   uses m_t
+      • CombinatorialUCB1BiddingAgent — update(r, c)      ignores m_t
+    The environment always reveals m_t; whether the agent uses it is the
+    agent's business.  This keeps the comparison on identical noise.
+    """
+    #### Initialize arrays to store the results of the trial
+    # all same shape T (number of rounds) x n_campaigns (number of campaigns)
+    rewards = np.zeros((env.T, env.n_campaigns), dtype=float)
+    costs = np.zeros((env.T, env.n_campaigns), dtype=float)
+    regrets = np.zeros(env.T, dtype=float)
+    actions = np.zeros((env.T, env.n_campaigns), dtype=bool) #actions = bids
+
+    #check if the agent is PrimalDualHedgeBiddingAgent or CombinatorialUCB1BiddingAgent
+    #if the agent is PrimalDualHedgeBiddingAgent, then it actually uses full feedback, otherwise it does not
+    uses_full_feedback = isinstance(agent, PrimalDualHedgeBiddingAgent)
+
+    #iterate over the rounds of the environment
+    for t in range(env.T):
+        ###### INTERACTION PROTOCOL
+        bids, active = agent.pull_action() #agent chooses campaigns in which to participate and the bids for each campaign
+        win_t, r_t, c_t, m_t = env.round(bids, active, full_feedback=True) #the environment returns the realized feedback (win_t, r_t, c_t, m_t) for the chosen campaigns and bids
+        #update the agent's internal state based on whether it uses full feedback or not
+        if uses_full_feedback:
+            agent.update(r_t, c_t, m_t)
+        else:
+            agent.update(r_t, c_t)          # Req-2 agent: semi-bandit as before
+        #we store the rewards, costs, actions, and regrets for the current round
+        rewards[t] = r_t
+        costs[t] = c_t
+        actions[t] = active
+        regrets[t] = clairvoyant_value - float(r_t.sum()) #compute regret with respect to the clairvoyant pre-roudn reward (clairvoyant_value) for the environment
+
+    return TrialResult2(
+        rewards=rewards,
+        costs=costs,
+        regrets=np.cumsum(regrets),
+        actions=actions,
+        lambda_history=agent.get_histories()[0],
+        budget_history=agent.get_histories()[1],
+    ) #return the results in a TrialResult2 container
+
+
+def _plot_regret_comparison(results_by_agent: Dict[str, list], title: str) -> None:
+    
+    """
+    Plot: cumulative regret over time, overlaid for every agent.
+
+    X-axis: round t.  Y-axis: mean cumulative regret up to round t, averaged
+    across all trials, with a shaded band (± standard error) showing the
+    trial-to-trial spread. One line per agent, so both agents can be
+    compared directly on the same axes.
+
+    How to read it: a curve that keeps climbing at a steady rate means the
+    agent never converges to the optimal strategy; a curve that flattens
+    out (grows more and more slowly) is the visual signature of SUBLINEAR
+    regret, i.e. the agent is successfully learning over time.
+    """
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for label, results in results_by_agent.items():
+        mat = np.stack([r.regrets for r in results], axis=0)
+        mean = mat.mean(axis=0)
+        se = mat.std(axis=0) / np.sqrt(mat.shape[0])
+        t_axis = np.arange(mat.shape[1])
+        color = AGENT_COLORS.get(label)
+        ax.plot(t_axis, mean, label=label, color=color)
+        ax.fill_between(t_axis, mean - se, mean + se, alpha=0.25, color=color)
+    ax.set_title(title)
+    ax.set_xlabel("Round t")
+    ax.set_ylabel("Cumulative regret")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def _plot_cost_comparison(results_by_agent: Dict[str, list],
+                          budget_line: float, title: str) -> None:
+    
+    """
+    Plot: cumulative spending over time, overlaid for every agent, against
+    the total budget.
+
+    X-axis: round t.  Y-axis: mean cumulative cost spent up to round t,
+    averaged across all trials, with a shaded band (± standard error).
+    A dashed horizontal line marks the total allowed budget (ρ·T).
+
+    How to read it: each agent's spending curve should track just under
+    the budget line, rising roughly at the target rate ρ per round. A
+    curve that crosses above the budget line means that agent is
+    overspending; a curve that stays far below it suggests the agent is
+    bidding too conservatively and leaving reward on the table.
+    """
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for label, results in results_by_agent.items():
+        mat = np.stack([r.costs.sum(axis=1).cumsum() for r in results], axis=0)
+        mean = mat.mean(axis=0)
+        se = mat.std(axis=0) / np.sqrt(mat.shape[0])
+        t_axis = np.arange(mat.shape[1])
+        color = AGENT_COLORS.get(label)
+        ax.plot(t_axis, mean, label=label, color=color)
+        ax.fill_between(t_axis, mean - se, mean + se, alpha=0.25, color=color)
+    ax.axhline(budget_line, color="crimson", linestyle="--", label="Budget B = ρ·T")
+    ax.set_title(title)
+    ax.set_xlabel("Round t")
+    ax.set_ylabel("Cumulative cost")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def _plot_lambda_comparison(results_by_agent: Dict[str, list], title: str) -> None:
+    
+    """
+    Plot: the dual variable λ_t (price of spending) over time, overlaid
+    for every agent.
+
+    X-axis: round t.  Y-axis: mean λ_t at round t, averaged across all
+    trials (no uncertainty band — this plot shows the raw trajectories).
+
+    How to read it: λ rising means the agent has detected it is
+    overspending and is penalizing expensive bids more heavily; λ near
+    zero means the agent feels comfortable relative to the budget. In
+    the non-stationary world, comparing how fast each agent's λ reacts
+    and re-settles after a regime change is a direct visual clue for why
+    one agent adapts to shifting competitor behavior better than another.
+    """
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for label, results in results_by_agent.items():
+        mat = np.stack([r.lambda_history for r in results], axis=0)
+        mean = mat.mean(axis=0)
+        t_axis = np.arange(mat.shape[1])
+        ax.plot(t_axis, mean, label=label, color=AGENT_COLORS.get(label))
+    ax.set_title(title)
+    ax.set_xlabel("Round t")
+    ax.set_ylabel(r"Dual variable $\lambda_t$")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+####### ORCHESTRATOR METHODS THAT IMPLEMENTS THE EXPERIMENT WE WANT TO RUN
+def run_experiment_req3(
+    T: int = 2_000, #set the time horizon of the problem
+    n_trials: int = 20, #set the number of trials per each agent (number fo simulations we run)
+    rho: float = 0.6, #set per round-budget
+    change_every: int = NS_CHANGE_EVERY, #set the change_every parameter for the non stationary environment 
+):
+    """
+    Requirement 3 — best-of-both-worlds experiment.
+
+    Runs Primal-Dual Hedge and Combinatorial-UCB on the SAME seeds in
+    (A) the stochastic world and (B) the highly non-stationary world, and
+    plots cumulative regret / cost / λ for each world.
+    """
+    # Same toy instance as Requirement 2 (readable, brute-forceable).
+    bid_set = np.round(np.linspace(0.0, 1.0, 6), 2) #6 equally distanced bids between 0 and 1 (rounded to 2 decimal placees)
+    values = np.array([1.0, 0.9, 1.1, 1.0], dtype=float) #value of each campaign (4 campaigns)
+    dist_configs = [
+        {"type": "uniform", "low": 0.0, "high": 1.0},
+        {"type": "beta", "a": 2, "b": 5},
+        {"type": "normal", "loc": 0.5, "scale": 0.2},
+        {"type": "normal", "loc": 0.5, "scale": 0.2},
+    ] #define the type of distribution for each campaign (4 campaigns)
+    #we also specify the parameters of the distributions, but only for the stochastic world
+    #for the non-stationary world, the distribution type will remain fixed, the parameters will vary every change_every rounds
+    conflict_graph = np.array(
+        [
+            [0, 0, 1, 1],
+            [0, 0, 1, 0],
+            [1, 1, 0, 0],
+            [1, 0, 0, 0],
+        ],
+        dtype=int,
+    ) #specify the conflict graph between campaigns (4 campaigns) (4x4 matrix) (1 means conflict, 0 means no conflict)
+
+    ##### METHOD TO CREATE FRESH AGENT INSTANCES FOR EACH TRIAL
+    def make_agents():
+        """Fresh agent instances (both agents, fixed order)."""
+        return {
+            "Primal-Dual (Hedge)": PrimalDualHedgeBiddingAgent(
+                bid_set=bid_set, values=values, conflict_graph=conflict_graph,
+                T=T, rho=rho, lambda_max=LAMBDA_MAX_REQ3, regime_length=change_every,
+            ),
+            "Combinatorial-UCB": CombinatorialUCB1BiddingAgent(
+                bid_set=bid_set, values=values, conflict_graph=conflict_graph,
+                T=T, rho=rho,
+            ),
+        }
+
+    # ── World A: STOCHASTIC ──────────────────────────────────────────────────
+    print("\n[Req 3 | World A] Stochastic environment ...")
+    
+    #### COMPUTE THE CLAIRVOYANT VALUE FOR THE STOCHASTIC WORLD (PER-ROUND EXPECTATED REWARD)
+    # This is computed only once before of all trials, because the stochastic environment is stationary.
+    # The clairvoyant per-reound value is the expected reward that an agent would get if it knew the distributions 
+    # of highest competing bids of the campaigns and could choose the best bid at each round.
+    #The function returns best feasible set of campaigns, the bid choice for each campaing and the per-round expected reward (gain) of the clairvoyant agent.
+    #We use only the per-round expected reward of the clairvoyant agent 
+    _, _, clv_stoch = compute_clairvoyant_mc(
+        bid_set=bid_set, values=values, dist_configs=dist_configs,
+        conflict_graph=conflict_graph, rho=rho, correlation=0.25,
+    )
+    print(f"  Stochastic clairvoyant (per-round): {clv_stoch:.4f}") #print the per-round expected reward of the clairovant agent
+    
+    ####### CREATE DICTIONARY TO STORE THE RESULTS OF EACH AGENT FOR THE STOCHASTIC WORLD
+    #it is adictionary that calls the make agent method once and has one label per agent 
+    results_A: Dict[str, list] = {label: [] for label in make_agents()}
+    #we make the seed correspodn to the number of trials
+    #and we run the differenti tials
+    for seed in range(n_trials):
+        for label, agent in make_agents().items():
+            # Re-seed PER AGENT so both agents face the identical environment
+            # noise AND identical internal randomness ordering.
+            np.random.seed(seed) #set the seed
+            env = MultiCampaignEnv(
+                bid_set=bid_set, values=values, dist_configs=dist_configs,
+                T=T, conflict_graph=conflict_graph, rho=rho, correlation=0.25,
+            ) #create common environment for both agents (stochastic multi-campaign environment) in order to have fair comparison
+            results_A[label].append(run_single_trial3(env, agent, clv_stoch)) #go through the dictionary and run the trial for each agent in the dictionary and apped the results to the dictionary
+
+    # ── World B: HIGHLY NON-STATIONARY ───────────────────────────────────────
+    print(f"[Req 3 | World B] Non-stationary environment "
+          f"(regime change every {change_every} rounds) ...")
+    
+    ##### CREATE DICTIONARY TO STORE THE RESULTS OF EACH AGENT FOR THE NON-STATIONARY WORLD
+    #it is a dictionary that calls the make agent method once and has one label per agent
+    results_B: Dict[str, list] = {label: [] for label in make_agents()}
+    
+    #we make the seed correspodn to the number of trials
+    #we run the desired numner of trials
+    for seed in range(n_trials):
+        # Build the environment ONCE per seed so the hindsight benchmark is
+        # computed on exactly the sequence both agents will face.
+        np.random.seed(seed) #set the seed
+        #create a reference non stationary environment
+        #on this environment we will not run any agent, we just use it to generate the common sequence of highest competing bids on which we compute the clairvoyant agent per-round reward (gain)
+        #and that we will use to overwrite the highest competing bids matrix of the specific non-stationary environment that each agent will face in the trial, so that both agents face the same 
+        # sequence of highest competing bids and we can have a fair comparison
+        env_ref = NonStationaryMultiCampaignEnv(
+            bid_set=bid_set, values=values, dist_configs=dist_configs,
+            T=T, conflict_graph=conflict_graph, rho=rho,
+            change_every=change_every,
+        )
+        # Compute the average per-round reward (gain) of the clairvoyant agent for the 
+        # specific sequence of highest competing bids that this agent is able to see in advance.
+        # remember that in this case the clairvoyant agent observes the specific matrix of highest competing bids 
+        # and doesn't know the distribution of highest competing bids of the campaigns, so it can only choose the best fixed feasible action in hindsight.
+        # This means we need to compute is average per-round reward for each trial. 
+        _, _, clv_hind = compute_hindsight_clairvoyant(
+            env_ref.competing_bids, bid_set, values, conflict_graph, rho,
+        )
+        #instantiate one non-stationary environment for each agent, 
+        # but we will overwrite the competing bids matrix of each environment with the one of the reference environment, 
+        # so that both agents face the same sequence of highest competing bids
+        for label, agent in make_agents().items():
+            env = NonStationaryMultiCampaignEnv(
+                bid_set=bid_set, values=values, dist_configs=dist_configs,
+                T=T, conflict_graph=conflict_graph, rho=rho,
+                change_every=change_every,
+            )
+            # Force the identical realized sequence for both agents - getting the one of the reference environment.
+            env.competing_bids = env_ref.competing_bids.copy()
+            np.random.seed(10_000 + seed)   # agent's internal randomness
+            results_B[label].append(run_single_trial3(env, agent, clv_hind)) #rrun trial for each agent in the decitionary and append the results to the dictionary
+
+    # ── Summary + plots ──────────────────────────────────────────────────────
+    print("\n  Final mean cumulative regret:")
+    for world, res in (("A stochastic", results_A), ("B non-stationary", results_B)):
+        for label, lst in res.items():
+            fr = float(np.mean([r.regrets[-1] for r in lst]))
+            print(f"    [{world:>17}] {label:<22} {fr:10.2f}")
+
+    _plot_regret_comparison(results_A, "Req 3 — Regret, Stochastic World (vs stochastic clairvoyant)")
+    _plot_cost_comparison(results_A, rho * T, "Req 3 — Cost, Stochastic World")
+    _plot_regret_comparison(results_B, "Req 3 — Regret, Non-Stationary World (vs best fixed action in hindsight)")
+    _plot_cost_comparison(results_B, rho * T, "Req 3 — Cost, Non-Stationary World")
+    _plot_lambda_comparison(results_B, "Req 3 — Dual variable λ, Non-Stationary World") #lmanda plot only available for experiment B, since 
+    """
+    Reason for which lambda plot done only for experiment B: for experiment A in the stochastic world, the plot is uninterestin, since lambda should just settle and stay flat.
+                                                             This because the competing-bid distribution for each campaign never changes in World A, once both agents figure out 
+                                                             roughly how much they need to spend to hit the target rate ρ, λ should converge to some steady value and stay there 
+                                                             for the rest of the run — there's no shock to react to, no regime change to adapt around.
+                                                             World B is designed to have competitor behavior jump every 25 rounds, this is precisely where you'd expect to see λ 
+                                                             do something worth showing: spike up right after a regime shift where competitors suddenly become cheaper to beat 
+                                                             (more auctions won, more spending, budget pressure rises), then relax back down as the agent adapts
+    """
+    return results_A, results_B
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Requirement 3 entry point.
+# NOTE: the `if __name__ == "__main__": main()` guard earlier in this file
+# executes BEFORE the Requirement-3 definitions above are parsed... actually
+# Python parses top-to-bottom, so by the time this line runs, everything is
+# defined.  This second guard simply chains Requirement 3 after main().
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("\n" + "#" * 60)
+    print("  REQUIREMENT 3 — Best-of-Both-Worlds, Multiple Campaigns")
+    print("#" * 60)
+    run_experiment_req3(T=2_000, n_trials=20, rho=0.6)
+    print("\n" + "#" * 60)
+    print("  Requirement 3 complete.")
+    print("#" * 60 + "\n")

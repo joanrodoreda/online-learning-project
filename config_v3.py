@@ -138,3 +138,59 @@ When budget is exhausted the agent returns this arm — cost = 0, reward ≈ 0."
 assert BID_SET[OPT_OUT_ARM_IDX] == 0.0, "Opt-out arm must be bid = 0.0"
 assert K == 11,                          "Bid set must contain exactly 11 bids"
 assert T0_ETC >= 1,                      "ETC exploration length must be ≥ 1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8.  REQUIREMENT 3 — Best-of-both-worlds, multiple campaigns  (additions)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Hedge learning rate to update the weights of the arms (bids)— theory-optimal learning rate for T rounds,
+# With K experts (arms/bids):  γ = sqrt(log K / T)   (in full-feedback it esnures a regret O(sqrt(T log K))).
+ETA_HEDGE: float = float(np.sqrt(np.log(K) / T))
+
+# Hyperparameter to create highly non-stationary environment necessary for requirement 3
+# it indicates the number of rounds in which a "regime" lasts in the non-stationary environment before the competitor's behavior is randomized again
+#25 is a design choice that is small enough that the world visibly shits many times over T=2000 rounds, large neought so that each regime isn't just noise
+#stationary ennvironment with abrupt changes every 25 rounds
+####### ENVIORNEMENT'S NON STATIONARY BEHAVIOR ##########
+"""
+Every 25 rounds each campaign's competing bid dsiteribution parameters are instantly and completely re-drawn from scratch,
+not drifting gradually, not smoothly interpolated. This is why we define it as a stationary enviornment with abrupt changes.
+Within each 25 round block the distribution reamins fixed and stationary (bids are i.i.d w.r.t the randomly chosen distribution).
+"""
+NS_CHANGE_EVERY: int = 25
+
+
+# LOOK UP TABLE FOR PARAMETER DISTRIBUTIONS
+"""
+This is the a look up table that tells the environment, for each distribution family, in which range the parameters of that distribution can 
+be extracted from when the regime changes. The design choice was to have three different possible distributions from which the highest competing
+bids of a campaign can be sampled and to randomize even more the behavior of the environment, we randomly select one of the three distributions
+and then we randomly sample the parameters of the distribution within the specified ranges in the look up table.
+"""
+NS_PARAM_RANGES: dict = {
+    "uniform": {"low": (0.0, 0.3), "high": (0.4, 1.0)},
+    "beta":    {"a": (1.0, 6.0), "b": (1.0, 6.0)},
+    "normal":  {"loc": (0.2, 0.8), "scale": (0.05, 0.30)},
+}
+
+# Cap on the dual variable λ used by the Req-3 primal-dual agent.
+# It puts a ceiling on how harshly overspending can get penalized (remember: λ grows when we cost > per-round budget)
+# Theory allows 1/ρ, but a smaller cap keeps the Hedge gain normalisation
+# from compressing the reward signal when ρ is tight.
+# In simpler term caping lambda to 1 and not 1/p allows to have greater difference between the normalized reward of actions when the budget is small. 
+# Without this with a very small budget the normalized Lagrangian rewards of a very good action (bid), might be very close to the one of a bad action (bid)
+LAMBDA_MAX_REQ3: float = 1.0
+
+###### HEDGE GAIN NORMALIZATION #########
+"""
+The Hedge Algorithm is an algorithm that works with rewards (losses) that need to be in the range [0,1]. Raw Lagrangian rewards are not natively in this range, 
+therefore we need to normalize them into [0,1]. To do so we introduce the Hedge Gain normlization formula: gain = (lagr + λ_max·v) / (v·(1 + λ_max)) - this returns
+essentially a "normalized Lagrangian reward" in [0,1] that can be fed to the Hedge algorithm. When lambda is capped at 1/p these normalized rewards get compressed in
+a very tight interval between in [0,1] meaning that the rewards of the different bids become very similar to each other. More difficult to understand what is the best bid.
+"""
+
+# Adds the plotting color for the two agents for the previously defined color dictionary. 
+# NOT ADDED DIRECTLY TO DICTIONARY TO SHOW INCREMENTAL NATURE OF PROJECT
+AGENT_COLORS["Primal-Dual (Hedge)"] = "#e377c2"   # pink
+AGENT_COLORS["Combinatorial-UCB"]   = "#17becf"   # teal

@@ -26,7 +26,7 @@ Theory references are cited inline with notebook/lecture anchors.
 from __future__ import annotations
 
 import numpy as np
-from config import UCB_EXPLORATION_FACTOR
+from config_v3 import UCB_EXPLORATION_FACTOR
 
 import itertools
 from dataclasses import dataclass
@@ -516,7 +516,8 @@ Implements a small, readable Combinatorial-UCB agent for multiple campaigns
 with a budget constraint.
 """
 
-
+# "EMPTY" FATHER CLASS 
+# the class exists in order to esnure that any class that inherits from it needs to have the pull_action and update method.
 class CombinatorialAgent:
     def __init__(self):
         pass
@@ -742,4 +743,255 @@ class CombinatorialUCB1BiddingAgent(CombinatorialAgent):
 
     def get_histories(self) -> Tuple[np.ndarray, np.ndarray]:
         """Return the stored lambda/budget trajectories for the current trial."""
+        return self.lambda_history.copy(), self.budget_history.copy()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REQUIREMENT 3 — Best-of-both-worlds primal-dual agent (Hedge + OGD dual)
+# ═════════════════════════════════════════════════════════════════════════════
+# Everything below is ADDITIVE.  Requirement 1 and 2 code above is untouched.
+
+
+class PrimalDualHedgeBiddingAgent(CombinatorialAgent): #CHILD CLASS OF CombinatorialAgent
+    """
+    Best-of-both-worlds primal-dual bidding strategy (Requirement 3).
+
+    ###### MOTIVATING HEDGE TO SOLVE PRIMAL PROBLEM FOR EACH CAMPAIGN
+    UCB's guarantees need i.i.d. rewards.  Under FULL FEEDBACK 
+    we observe every campaign's highest competing bid m_{i,t}, so we can
+    compute what reward/cost EVERY bid would have produced:
+        f_i(b) = (v_i − b)·1[b ≥ m_{i,t}]      c_i(b) = b·1[b ≥ m_{i,t}]
+    That turns the primal problem into a full-information expert problem, hence
+    the natural regret minimizer is Hedge (multiplicative weights), which is
+    O(√(T log K)) against ANY sequence (adversarial or stochastic). Combined
+    the OGD on the dual on the budget: on the lambda of the Lagrangian game 
+    that controls how strongly the per-round budget constraint needs to be respected.
+    This is the primal-dual template (agent) that is repated for each campaign
+    in the problem. 
+    #IN SHORT: YOU HAVE A LAGRANGIAN GAME (PRIMAL-DUAL PROBLEM) FOR EACH CAMPAIGN, 
+               WHERE THE DUAL IS IN COMMON TO ALL CAMPAIGNS, SINCE SINGLE BUDGET FOR
+               ALL CAMPAIGNS. YOU INSTANTIATE A HEDGE AGENT TO SOLVE THE PRIMAL FOR 
+               EACH CAMPAIGN (WORKING WITH FULL FEEDBACK) AND THE DUAL PROBLEM IS SOLVED
+               BY AN "ADVERSARY" GRADIENT DESCENT THAT ADJUST LAMBDA BY LOOKING AT THE COSTS
+               INCURRED BY ALL CAMPAIGNS COMPARING IT TO THE PER-ROUND BUDGET. 
+
+    ###### Algorithm 
+    State: one Hedge weight vector w_i ∈ R^K per campaign, shared dual λ_t.
+    - where K is the number of possible bids (discretized set)
+
+    Each round t:
+      PRIMAL —
+        1. p_i = w_i / Σ w_i for each campaign (Hedge distributions).
+        2. Score each campaign by its expected Lagrangian gain under p_i
+           (vector of running average of each bid x probability distribution p_i); 
+           pick the independent set S of the conflict graph maximizing Σ_{i∈S} score_i, provided
+           score_i > opt-out value (opt-out value = 0, we consider a campaign 
+           if its score is better than not participating in the campaign).
+        3. For each i ∈ S sample b_i ~ p_i  (randomization is REQUIRED
+           against an adversary — deterministic play is exploitable).
+      OBSERVE — full feedback m_t (all campaigns, active or not).
+      DUAL / UPDATE —
+        4. Compute gain of every (i, b):
+              g_i(b) = [ f_i(b) − λ_t · c_i(b) ]  normalized to [0, 1]
+        5. Hedge update for ALL campaigns:  w_i(b) ← w_i(b)·exp(γ·g_i(b)).
+        6. OGD dual:  λ ← clip( λ + η·(Σ_i c_{i,t} − ρ), 0, λ_max ).
+        7. Hard budget guard: once budget is exhausted, opt out entirely from all campaigns
+
+    ##### Normalisation note 
+    Theory allows λ_max = 1/ρ, but the Hedge gains must be mapped into [0,1];
+    a large λ_max compresses the reward signal in that mapping and slows
+    learning.  EXPLAINED IN config.py FILE FOR THE HYPERPARAM CONFIG FOR REQ3.
+
+    ##### INPUT PARAMETERS
+    ----------
+    bid_set        : (K,) array   Discrete bid set (must contain 0.0 = opt-out).
+    values         : (N,) array   Campaign values v_i.
+    conflict_graph : (N, N) array 0/1 adjacency of non-compatible campaigns.
+    T              : int          Horizon.
+    rho            : float        Per-round budget ρ = B/T (shared, global).
+    eta_dual       : float|None   OGD step. Default 1/√T (theory).
+    eta_hedge      : float|None   Hedge rate. Default √(log K / regime_length) (theory).
+    lambda_max     : float        Cap on λ (see note). Default 1.0.
+    regime_length  : int|None     Length of regime for non-stationary environments. 
+                                   If None, defaults to T (full horizon).
+    """
+    
+    #class attribute: a label attached to every instance of agent used purely for labelling
+    label: str = "Primal-Dual (Hedge)"
+
+    def __init__( 
+        self,
+        bid_set: np.ndarray,
+        values: Sequence[float],
+        conflict_graph: np.ndarray,
+        T: int,
+        rho: float,
+        eta_dual: float = None,
+        eta_hedge: float = None,
+        lambda_max: float = 1.0,
+        regime_length: int = None,
+    ): #CONSTRUCTOR
+        
+        #call the constructor of the parent class (CombinatorialAgent) which is empty
+        #create one attribute per passed input parameter
+        super().__init__()
+        self.bid_set = np.asarray(bid_set, dtype=float) #set of possible bids (discretized)
+        self.values = np.asarray(values, dtype=float) #array containing value of each campaign
+        self.n_campaigns = len(self.values) #number of campaigns (N)
+        self.K = len(self.bid_set) #number of possible bids (K)
+        self.conflict_graph = np.asarray(conflict_graph, dtype=int) #conflict graph indicating non-compatible campaigns #2d array of shape (N, N) with 0/1 entries
+        self.T = int(T) #time horizon (number of rounds)
+        self.rho = float(rho) #per-round budget (B/T)
+        self.regime_length = int(regime_length) if regime_length is not None else self.T #regime length for non-stationary environments, defaults to T
+        
+        self.eta_dual = float(eta_dual) if eta_dual is not None else 1.0 / np.sqrt(T) #use passed eta, otherwise default to 1/sqrt(T)
+        self.eta_hedge = (float(eta_hedge) if eta_hedge is not None
+                          else np.sqrt(np.log(self.K) / self.regime_length)) #use passed eta, otherwise default to sqrt(log K / regime_length) - uses regime length instead of full time horizon T
+        self.lambda_max = float(lambda_max) #cap on the dual variable λ (see note)
+
+        # PRIMAL PROBLEM STATE: 
+        # initialize Hedge weights table of shape (N, K) - one entry corresponds to the log weight for a campaign and an available bid
+        self.log_weights = np.zeros((self.n_campaigns, self.K), dtype=float) #all initialized to 0, so initial distribution over bids is uniform for all campaigns (softmax of 0 is uniform)
+        # initialize second table of shape (N, K) to store the running average (sample average on observed rounds) of the Lagrangian gain (reward) for each campaign and bid
+        self.avg_gain = np.zeros((self.n_campaigns, self.K), dtype=float) #initialized all to 0, so initially the average gain is 0 for all bids with respect to all campaigns
+
+        # DUAL PROBLEM STATE:
+        self.lambda_t = 0.0 #initialize dual variable λ_t to 0 (Lagrangian game of each campaign starts unconstrained)
+        #we start with no penalty on over-spending, since we haven't spent anything yet. 
+        # The dual variable will be updated in the update() method based on the observed costs and the per-round budget rho.
+        self.budget_remaining = self.rho * T #initialize budget remaining to total budget (B = ρ·T). This will be decremented in update() as costs are incurred.
+
+        self.t = 0 #initialize round counter to 0 (will be incremented in update() after each round)
+        self.last_bids = np.zeros(self.n_campaigns, dtype=float) #initialize last selected bids array (it contains last bid for each campaign)
+        self.last_active = np.zeros(self.n_campaigns, dtype=bool)#initialize last active campaigns array (it contains True for campaigns that were selected in the last round, False otherwise)
+
+        #Precompute feasible subsets (same helper as Requirement 2).
+        self.independent_sets = enumerate_independent_sets(self.conflict_graph)
+
+        #Trajectories for plotting.
+        self.lambda_history = np.zeros(self.T, dtype=float) #array with one entry per round to store the value of λ_t at each round
+        self.budget_history = np.zeros(self.T, dtype=float) #array with one entry per round to store the value of budget_remaining at each round
+
+    #### HELPER METHOD
+    # this method has the goal to turn the hedge weights into probabilities
+    def _distributions(self) -> np.ndarray: #it returns a matrix of probabilities of shape (N, K) where each row represents the probability distribution over bids for a campaign
+        """Row-wise softmax of log-weights → (N, K) Hedge distributions."""
+        #numerical stability trick that subtracts the max log weight from the log weights of each row to avoid overflow in the exponentiation
+        #this doesn't change the resulting probability distribution since softmax is invariant to constant shifts in the input
+        #the biggest number in eeach row becomes exactly 0.
+        lw = self.log_weights - self.log_weights.max(axis=1, keepdims=True) 
+        w = np.exp(lw) #converts the log weights into actual weights by exponentiating them
+        #compute the row-wise softmax by dividing each weight by the sum of weights in its row, 
+        #resulting in a valid probability distribution for each campaign over the available bids
+        return w / w.sum(axis=1, keepdims=True) 
+
+    
+    #### METHOD THAT DETERMINS WHICH ARM IS PULLED IN THE CURRENT ROUND
+    def pull_action(self) -> Tuple[np.ndarray, np.ndarray]:
+        #verifies if within the time horizon
+        if self.t < self.T:
+            self.lambda_history[self.t] = self.lambda_t #store the current value of the dual variable λ_t in the history array for plotting 
+            self.budget_history[self.t] = self.budget_remaining #store the current value of the remaining budget in the history array for plotting 
+
+        # Hard budget guard: opt out entirely once the budget is exhausted.
+        # in the case the budget is under the indicated thrshold below we opt-out of all campaigns
+        if self.budget_remaining <= 1e-9:
+            self.last_bids[:] = 0.0
+            self.last_active[:] = False
+            return self.last_bids.copy(), self.last_active.copy()
+
+        p = self._distributions() # use distribution helper method to compute the probability distribution over the bids for each campagin - matrix (N, K)
+
+        # Expected Lagrangian gain of activating each campaign under its own
+        # Hedge distribution.  Baseline 0 = opting out (bid 0 → no gain).
+        # multiply every row of p by the corresponding row of avg_gain. Then sum the elements on the row of the resulting matrix
+        #this get the expected Lagrangian gain (reward) for each campaign under its own current Hedge distribution.
+        camp_score = (p * self.avg_gain).sum(axis=1)    # (N,) - vector of N expected Lagrangian gains- one for each campaign
+
+        # Choose the best compatible set of arms to be activated, based on the expected Lagrangian gain. 
+        clipped = np.maximum(camp_score, 0.0) #campaigns with negative expected gain are clipped to 0, we only consider campaigns with non-negative expected gain for selection
+        best_subset, best_val = tuple(), -np.inf #we initialize the two variables that will store the best independent (compatible) set of campaigns and its corresponding expected gain value
+        for subset in self.independent_sets: #iterate over all feasible independent sets of campaigns (compatible sets)
+            val = float(sum(clipped[i] for i in subset)) #we sum the expected gains of the campaigns in the current subset to get the total expected gain for that subset
+            if val > best_val: #if the total expected gain of the current subset is better than the best found so far, we update the best found values  
+                best_val = val 
+                best_subset = subset
+
+        # Once we have decided the best set of campaigns to activate, we sample a bid for each of them according to their own Hedge distribution.
+        # campaigns that are not in the best subset will have bid 0 and will be inactive
+        bids = np.zeros(self.n_campaigns, dtype=float) #initialize vector containing bids we will choose
+        active = np.zeros(self.n_campaigns, dtype=bool) #initialize vector containing which campaigns will be active (True) or inactive (False)
+        
+        for i in best_subset: #for each campaign in the best independent set previously indentified
+            if camp_score[i] <= 0.0 and self.t >= self.K:
+                continue                                #additional secruity check controlling that we are not considering a campagin with negative expected gain (should not happen)
+            b_idx = int(np.random.choice(self.K, p=p[i])) #sample a bid index from the probability distribution over bids for campaign i (row i of p) using numpy's random choice function
+            bids[i] = self.bid_set[b_idx] #store the bid
+            active[i] = True #set active to true for that campagin
+
+        self.last_bids = bids #store the vector of selected vids 
+        self.last_active = active #store the vector of active campaigns
+        return bids.copy(), active.copy() #return a copy of both
+
+    
+    ##### METHOD THAT UPDATES THE AGENT'S INTERNAL STATE AFTER OBSERVING THE REALIZED REWARDS AND COSTS
+    def update(self, reward_vec, cost_vec, m_t) -> None:
+        """
+        Full-feedback update.
+
+        Parameters
+        ----------
+        reward_vec : (N,) realized rewards (only active campaigns non-zero).
+        cost_vec   : (N,) realized costs.
+        m_t        : (N,) OBSERVED highest competing bids — full feedback,
+                     available for every campaign 
+        """
+        #we convert the vector of highest competing bids at round t of each campaign into a numpy array of floats
+        m_t = np.asarray(m_t, dtype=float)
+
+        ##### Compute the Lagrangian gain for every bid under every campaign, using the full feedback m_t.
+        # f_i(b) = (v_i − b)·1[b ≥ m_{i,t}]      c_i(b) = b·1[b ≥ m_{i,t}]
+        # g_i(b) = f_i(b) − λ_t · c_i(b)
+        #we compute a boolean matrix of shape (N, K) where each entry indicates whether 
+        #the bid b is greater than or equal to the observed highest competing bid m_t for campaign i
+        #Therefore position i,j is True if bid j is greater than or equal to the observed highest competing bid for campaign i, and False otherwise
+        #broadcasting is used
+        wins = self.bid_set[None, :] >= m_t[:, None]                # (N, K) #compare the set of possible bids [1xK] with the highest competing bids of each campagin [Nx1]
+        f = (self.values[:, None] - self.bid_set[None, :]) * wins   # reward - compute reward for each possible bid for each campaign and then multiply by wins to obtain a (N,K) reward matrix
+        c = self.bid_set[None, :] * wins                            # cost - compute cost for each possible bid for each campaign and then multiply by wins to obtain a (N,K) cost matrix
+        lagr = f - self.lambda_t * c                                # gain - compute the Lagrangian gain for each possible bid for each campaign by subtracting the cost term 
+        #    weighted by the dual variable λ_t from the reward term
+
+        ####### Normalize to [0, 1] since hedge requires gains (rewards) in [0, 1]. 
+        #Use the following fomrula to map the Lagrangian gain to [0,1] range (Hedge normalized Gains)
+        #    lagr ∈ [−λ_max·v_i,  v_i]  →  (lagr + λ_max·v_i) / (v_i(1+λ_max))
+        v = self.values[:, None]
+        gain = (lagr + self.lambda_max * v) / (v * (1.0 + self.lambda_max))
+        gain = np.clip(gain, 0.0, 1.0)
+
+        ####### Primal update — update of Hedge weights for ALL campaigns (this is the full-feedback benefit).
+        self.log_weights += self.eta_hedge * gain #we are updating the log weights hence we have a sum and not multiplication
+
+        ### Upate the Running average gain of each bid for each campaign, centered around the zero-gain level.
+        # In this way, the average gain is always in [-1, 1] and Hedge sees a "balanced" signal.
+        # if average gain is positive, it means that the bid is performing better than the zero-gain level, better than not bidding.
+        zero_level = self.lambda_max / (1.0 + self.lambda_max)
+        self.avg_gain += ((gain - zero_level) - self.avg_gain) / (self.t + 1) #classical incremental update formula of the average (centered on the zero-gain level)
+
+        ###### DUAL OGD STEP  - update lambda shared by all campaigns.  This is the "adversary" in the primal-dual game.
+        # λ_{t+1} = clip( λ_t + η·(Σ_i c_{i,t} − ρ), 0, λ_max )
+        total_cost = float(np.asarray(cost_vec, dtype=float).sum()) #total cost incurred in the current round by all campaigns (sum cost of all campaigns)
+        self.lambda_t = float(np.clip(
+            self.lambda_t + self.eta_dual * (total_cost - self.rho),
+            0.0,
+            self.lambda_max,
+        )) #update lambda and clip between 0 and lambda_max (1), already explained why.
+
+        ###### update budget remaining and increment round counter
+        self.budget_remaining -= total_cost
+        self.t += 1
+
+    ###### METHOD THAT RETURNS THE HISTORIES OF LAMBDA AND BUDGET FOR PLOTTING PURPOSES
+    def get_histories(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return the stored λ / budget trajectories (same API as Req 2)."""
         return self.lambda_history.copy(), self.budget_history.copy()
