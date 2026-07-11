@@ -51,11 +51,11 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
 
-from agents_v3 import CombinatorialUCB1BiddingAgent
-from environment_v3 import MultiCampaignEnv, compute_clairvoyant_mc
+from agents_v4 import CombinatorialUCB1BiddingAgent
+from environment_v4 import MultiCampaignEnv, compute_clairvoyant_mc
 
 # ── Project modules ──────────────────────────────────────────────────────────
-from config_v3 import (
+from config_v4 import (
     V, BID_SET, K, T, N_TRIALS, RANDOM_SEED_START,
     RHO_MODERATE, RHO_TIGHT, BUDGET_MODERATE, BUDGET_TIGHT,
     ETA_DUAL, DIST_CONFIGS, DEFAULT_DIST, T0_ETC,
@@ -63,13 +63,13 @@ from config_v3 import (
     FIGURE_SIZE, UNCERTAINTY_ALPHA, AGENT_COLORS,
     OPT_OUT_ARM_IDX,
 )
-from environment_v3 import (
+from environment_v4 import (
     SingleCampaignEnv,
     compute_true_arm_means,
     compute_clairvoyant,
     validate_environment,
 )
-from agents_v3 import (
+from agents_v4 import (
     Agent,
     RandomBiddingAgent,
     GreedyBiddingAgent,
@@ -1116,12 +1116,12 @@ if __name__ == "__main__":
 #   Expected story: comparable in World A; UCB degrades in World B while the
 #                   primal-dual method keeps sublinear regret in world B, hence best of both worlds.
 
-from agents_v3 import PrimalDualHedgeBiddingAgent #import our agent's class
-from environment_v3 import (
+from agents_v4 import PrimalDualHedgeBiddingAgent #import our agent's class
+from environment_v4 import (
     NonStationaryMultiCampaignEnv,
     compute_hindsight_clairvoyant,
 ) #import the non-stationary environment class and the clairvoyant function to compute the clairvoyant values over the rounds
-from config_v3 import NS_CHANGE_EVERY, LAMBDA_MAX_REQ3 #import necessary configurations from the config file
+from config_v4 import NS_CHANGE_EVERY, LAMBDA_MAX_REQ3 #import necessary configurations from the config file
 
 
 #### METHOD TO RUN ONE FULL SIMULATION FOR ONE AGENT
@@ -1447,4 +1447,236 @@ if __name__ == "__main__":
     run_experiment_req3(T=2_000, n_trials=20, rho=0.6)
     print("\n" + "#" * 60)
     print("  Requirement 3 complete.")
+    print("#" * 60 + "\n")
+
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REQUIREMENT 4 — Slightly non-stationary world:
+#                 SW-CUCB  vs  CD-CUCB  vs  Primal-Dual (Hedge)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Experiment design (project slides 18–19):
+#   Environment  - SlightlyNonStationaryMultiCampaignEnv: rounds partitioned
+#                  in FEW LONG intervals (default 5 × 400 rounds); fixed
+#                  distribution inside each interval, different distribution
+#                  per interval.
+#   Algorithms   - Combinatorial-UCB + sliding window   (semi-bandit)
+#                - Combinatorial-UCB + change detector  (semi-bandit)
+#                - the primal-dual method of Req 3      (full feedback)
+#   Benchmark    - the DYNAMIC per-interval oracle: best fixed feasible
+#                  action in hindsight PER INTERVAL (recomputed per trial).
+#                  In a piecewise-stationary world this is the value an
+#                  instantly-adapting learner could hope to track, which is
+#                  exactly what SW / CD are trying to approximate. 
+#                - The weaker single-fixed-action oracle is also printed for
+#                  reference/discussion.
+#   Fairness     - all three agents face the identical realized competing-bid
+#                  sequence per seed (same copy-the-matrix trick as Req 3).
+# Expected story - SW pays a roughly constant re-learning cost after every
+#                  breakpoint; CD pays a (detection delay + restart) cost;
+#                  primal-dual reacts within a few rounds but pays Hedge's
+#                  ongoing randomization price inside each stable interval.
+
+from agents_v4 import (
+    SlidingWindowCombinatorialUCBAgent,
+    ChangeDetectorCombinatorialUCBAgent,
+)
+from environment_v4 import (
+    SlightlyNonStationaryMultiCampaignEnv,
+    compute_per_interval_clairvoyant,
+)
+from config_v4 import (
+    N_INTERVALS_REQ4,
+    SW_WINDOW_REQ4,
+    CD_WARMUP,
+    CD_DRIFT,
+    CD_THRESHOLD,
+)
+
+#### PLOTS FOR REGRET COMPARISON
+def _plot_regret_comparison_req4(
+    results_by_agent: Dict[str, list],
+    title: str,
+    breakpoints: Sequence[int],
+) -> None:
+    """
+    Plot: cumulative regret over time, overlaid for every agent, with
+    vertical dashed lines marking the TRUE regime breakpoints.
+
+    Identical to _plot_regret_comparison (mean curve ± standard-error band
+    per agent), plus the breakpoint markers
+    """
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for label, results in results_by_agent.items():
+        mat = np.stack([r.regrets for r in results], axis=0)
+        mean = mat.mean(axis=0)
+        se = mat.std(axis=0) / np.sqrt(mat.shape[0])
+        t_axis = np.arange(mat.shape[1])
+        color = AGENT_COLORS.get(label)
+        ax.plot(t_axis, mean, label=label, color=color)
+        ax.fill_between(t_axis, mean - se, mean + se, alpha=0.25, color=color)
+    for j, bp in enumerate(breakpoints):
+        ax.axvline(bp, color="black", linestyle="--", alpha=0.4,
+                   label="Regime breakpoints" if j == 0 else None)
+    ax.set_title(title)
+    ax.set_xlabel("Round t")
+    ax.set_ylabel("Cumulative regret")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+#### METHOD TO IMPLEMENT THE EXPERIMENT FOR REQUIREMENT 4
+def run_experiment_req4(
+    T: int = 2_000,
+    n_trials: int = 20,
+    rho: float = 0.6,
+    n_intervals: int = N_INTERVALS_REQ4,
+    sw_window: int = SW_WINDOW_REQ4,
+):
+    """
+    Requirement 4 — slightly non-stationary environment experiment.
+
+    Runs SW-CUCB, CD-CUCB and the Req-3 primal-dual method on identical
+    realized sequences, measured against the per-interval dynamic oracle,
+    and produces the comparison plots (regret with breakpoints, cost, λ).
+    Also reports the change detector's alarm rounds vs the true breakpoints.
+    """
+    # Same toy instance as Requirements 2–3, for cross-requirement comparability.
+    bid_set = np.round(np.linspace(0.0, 1.0, 6), 2)
+    values = np.array([1.0, 0.9, 1.1, 1.0], dtype=float)
+    dist_configs = [
+        {"type": "uniform", "low": 0.0, "high": 1.0},
+        {"type": "beta", "a": 2, "b": 5},
+        {"type": "normal", "loc": 0.5, "scale": 0.2},
+        {"type": "normal", "loc": 0.5, "scale": 0.2},
+    ]
+    conflict_graph = np.array(
+        [
+            [0, 0, 1, 1],
+            [0, 0, 1, 0],
+            [1, 1, 0, 0],
+            [1, 0, 0, 0],
+        ],
+        dtype=int,
+    )
+    interval_length = int(np.ceil(T / n_intervals))
+
+    def make_agents():
+        """Fresh instances of the three agents slide 19 asks to compare."""
+        return {
+            "SW-Combinatorial-UCB": SlidingWindowCombinatorialUCBAgent(
+                bid_set=bid_set, values=values, conflict_graph=conflict_graph,
+                T=T, rho=rho, window=sw_window, eta=1.0/np.sqrt(interval_length),
+            ),
+            "CD-Combinatorial-UCB": ChangeDetectorCombinatorialUCBAgent(
+                bid_set=bid_set, values=values, conflict_graph=conflict_graph,
+                T=T, rho=rho,
+                cd_warmup=CD_WARMUP, cd_drift=CD_DRIFT,
+                cd_threshold=CD_THRESHOLD, eta=1.0/np.sqrt(interval_length),
+            ),
+            # Primal-dual is tuned to the interval length, exactly as it was
+            # tuned to the regime length in Requirement 3 (η = √(log K / L)).
+            "Primal-Dual (Hedge)": PrimalDualHedgeBiddingAgent(
+                bid_set=bid_set, values=values, conflict_graph=conflict_graph,
+                T=T, rho=rho, lambda_max=LAMBDA_MAX_REQ3,
+                regime_length=interval_length,
+            ),
+            "Combinatorial-UCB (vanilla)": CombinatorialUCB1BiddingAgent(
+                bid_set=bid_set, values=values, conflict_graph=conflict_graph,
+                T=T, rho=rho,
+            ),
+        }
+
+    print(f"\n[Req 4] Slightly non-stationary environment: "
+          f"{n_intervals} intervals × {interval_length} rounds ...")
+
+    results: Dict[str, list] = {label: [] for label in make_agents()}
+    fixed_oracles, dynamic_oracles = [], []
+    all_detections: list = []
+    breakpoints_ref: Sequence[int] = []
+
+    for seed in range(n_trials):
+        # Reference environment: generates this seed's realized sequence,
+        # shared by all three agents (identical-noise fairness, as in Req 3).
+        np.random.seed(seed)
+        env_ref = SlightlyNonStationaryMultiCampaignEnv(
+            bid_set=bid_set, values=values, dist_configs=dist_configs,
+            T=T, conflict_graph=conflict_graph, rho=rho,
+            n_intervals=n_intervals,
+        )
+        breakpoints_ref = env_ref.breakpoints
+
+        # Benchmarks for THIS realized sequence (recomputed per trial):
+        #   dynamic (per-interval) oracle → used for regret;
+        #   single-fixed-action oracle    → printed for discussion.
+        clv_dyn = compute_per_interval_clairvoyant(
+            env_ref.competing_bids, bid_set, values, conflict_graph, rho,
+            env_ref.breakpoints,
+        )
+        _, _, clv_fixed = compute_hindsight_clairvoyant(
+            env_ref.competing_bids, bid_set, values, conflict_graph, rho,
+        )
+        dynamic_oracles.append(clv_dyn)
+        fixed_oracles.append(clv_fixed)
+
+        for label, agent in make_agents().items():
+            env = SlightlyNonStationaryMultiCampaignEnv(
+                bid_set=bid_set, values=values, dist_configs=dist_configs,
+                T=T, conflict_graph=conflict_graph, rho=rho,
+                n_intervals=n_intervals,
+            )
+            # Same realized sequence for every agent; fresh round counter.
+            env.competing_bids = env_ref.competing_bids.copy()
+            # Separate seed stream for the agents' internal randomness
+            # (Hedge's bid sampling), as in Requirement 3.
+            np.random.seed(10_000 + seed)
+            # run_single_trial3 is reused verbatim: it already routes full
+            # feedback to the primal-dual agent and semi-bandit feedback to
+            # every CombinatorialUCB1BiddingAgent subclass (SW and CD).
+            results[label].append(run_single_trial3(env, agent, clv_dyn))
+            if isinstance(agent, ChangeDetectorCombinatorialUCBAgent):
+                all_detections.append(agent.detections)
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    print(f"  Dynamic per-interval oracle (per-round, mean over trials): "
+          f"{np.mean(dynamic_oracles):.4f}")
+    print(f"  Single fixed-action oracle  (per-round, mean over trials): "
+          f"{np.mean(fixed_oracles):.4f}   "
+          f"(adaptivity headroom: "
+          f"{(np.mean(dynamic_oracles) - np.mean(fixed_oracles)) * T:.1f} "
+          f"total reward over T)")
+    print("\n  Final mean cumulative regret (vs dynamic oracle):")
+    for label, lst in results.items():
+        fr = float(np.mean([r.regrets[-1] for r in lst]))
+        print(f"    {label:<24} {fr:10.2f}")
+    print(f"\n  True breakpoints: {list(breakpoints_ref)}")
+    print(f"  Change-detector alarms, first 3 trials: {all_detections[:3]}")
+
+    # ── Plots ────────────────────────────────────────────────────────────────
+    _plot_regret_comparison_req4(
+        results,
+        "Req 4 — Regret, Slightly Non-Stationary World (vs per-interval oracle)",
+        breakpoints_ref,
+    )
+    _plot_cost_comparison(results, rho * T,
+                          "Req 4 — Cost, Slightly Non-Stationary World")
+    _plot_lambda_comparison(results,
+                            "Req 4 — Dual variable λ, Slightly Non-Stationary World")
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Requirement 4 entry point — chained after the Requirement 3 block above.
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("\n" + "#" * 60)
+    print("  REQUIREMENT 4 — Slightly Non-Stationary, Multiple Campaigns")
+    print("#" * 60)
+    run_experiment_req4(T=2_000, n_trials=20, rho=0.6)
+    print("\n" + "#" * 60)
+    print("  Requirement 4 complete.")
     print("#" * 60 + "\n")

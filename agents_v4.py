@@ -26,7 +26,7 @@ Theory references are cited inline with notebook/lecture anchors.
 from __future__ import annotations
 
 import numpy as np
-from config_v3 import UCB_EXPLORATION_FACTOR
+from config_v4 import UCB_EXPLORATION_FACTOR
 
 import itertools
 from dataclasses import dataclass
@@ -528,34 +528,38 @@ class CombinatorialAgent:
     def update(self, reward_vec, cost_vec):
         raise NotImplementedError
 
-
+#### THIS METHODS RETRIEVES ALL THE POSSIBLE COMPATIBLE SUBSET OF AUCTIONS
 def enumerate_independent_sets(conflict_graph: np.ndarray) -> List[Tuple[int, ...]]:
     """
     Return every subset of campaigns that does not contain a conflict.
 
     This is the "combinatorial" part of the problem: we do not choose a
     single arm, but a whole set of campaigns that can be played together.
-    For small N, brute-force enumeration is the clearest way to do it.
+    For small N, brute-force enumeration is the clearest way to do it. (We 
+    are assuming a small number of campaigns).
     """
+    #retrieve the number of campaigns
     n = conflict_graph.shape[0]
-    feasible = [tuple()]
+    feasible = [tuple()] #initialize an empty list. It will contain the tuples that represent compatible subsets of campaigns
+    #loop over all possible subset size (from size=1 to size=n)
     for r in range(1, n + 1):
         # itertools.combinations gives all subsets of size r.
-        for subset in itertools.combinations(range(n), r):
-            ok = True
-            # Check that no pair inside the subset is connected by an edge.
-            for i, u in enumerate(subset):
+        # for example if subset size = 5, total number of susbet of dim 5: 2^5 = 32
+        for subset in itertools.combinations(range(n), r): #iterate over all possible subsets of size r
+            ok = True #variable ok = True if subset compatible, ok = False if subset not compatible
+            # check that all possible pairs of campaigns in the subset are compatible
+            for i, u in enumerate(subset): 
                 for v in subset[i + 1 :]:
-                    if conflict_graph[u, v] or conflict_graph[v, u]:
+                    if conflict_graph[u, v] or conflict_graph[v, u]: #check both edges for the campaign u (more efficient)
                         ok = False
                         break
                 if not ok:
                     break
             if ok:
-                feasible.append(subset)
-    return feasible
+                feasible.append(subset) #if set feasible append to list of feasible sets
+    return feasible #return list of feasible sets
 
-
+#### CLASS TO IMPLEMENT COMBINATORIAL UCB AGENT 
 class CombinatorialUCB1BiddingAgent(CombinatorialAgent):
     """
     Combinatorial UCB with a budget constraint.
@@ -565,52 +569,57 @@ class CombinatorialUCB1BiddingAgent(CombinatorialAgent):
       - choose one bid per selected campaign
       - unselected campaigns receive bid 0
     """
-
+    
+    #label associated to the class used to label the agents during plotting
     label: str = "Combinatorial-UCB"
 
+    #CONSTRUCTOR
     def __init__(
         self,
-        bid_set: np.ndarray,
-        values: Sequence[float],
-        conflict_graph: np.ndarray,
-        T: int,
-        rho: float,
-        eta: float = None,
+        bid_set: np.ndarray, #set of available bids
+        values: Sequence[float], #array of campaign values (one value per campaign)
+        conflict_graph: np.ndarray, #conflict (binary) matrix NxN
+        T: int, #time horizon other which the agent needs to interact (time horizon of problem)
+        rho: float, #per-round budget
+        eta: float = None, #dual learning rate (to update param lambda)
     ):
-        super().__init__()
-        # Store the problem instance in numpy form for vectorized operations.
+        super().__init__() #calls the constructor of the father class (empty class) - mandatory line of code, but doesn't instantiate anything
+        # Generate one attribute per input parameter
         self.bid_set = np.asarray(bid_set, dtype=float)
         self.values = np.asarray(values, dtype=float)
-        self.n_campaigns = len(self.values)
-        self.K = len(self.bid_set)
+        self.n_campaigns = len(self.values) #ADDITIONAL ATTRIBUTE - NUMBER OF CAMPAIGNS
+        self.K = len(self.bid_set) #ADDITIONAL ATTRIBUTE - NUMBR OF POSSIBLE BIDS
         self.conflict_graph = np.asarray(conflict_graph, dtype=int)
         self.T = int(T)
         self.rho = float(rho)
+        # learning rate: specified or set to the theoretical one (guarantees total regret of sqrt.(T))
         self.eta = float(eta) if eta is not None else 1.0 / np.sqrt(T)
 
-        # λ_t is the dual variable: if we overspend, it goes up and makes
-        # expensive actions less attractive.
+        # λ_t is the dual variable: if we overspend, it increases in value penalizing the per-budget constraint violation
         self.lambda_t = 0.0
         # Remaining budget in "real" units, used as a guardrail.
-        self.budget_remaining = self.rho * T
-        self.t = 0
+        self.budget_remaining = self.rho * T #remaining budget initialized to total budget remaining
+        self.t = 0 #current round counter
 
         # N[i, b] = how many times campaign i was played with bid b.
-        self.N = np.zeros((self.n_campaigns, self.K), dtype=float)
+        self.N = np.zeros((self.n_campaigns, self.K), dtype=float) #number of campaigns (N) x number of possible (K)
         # Empirical mean reward for each campaign-bid pair.
-        self.mean_rewards = np.zeros((self.n_campaigns, self.K), dtype=float)
+        self.mean_rewards = np.zeros((self.n_campaigns, self.K), dtype=float) #NxK matrix
         # Empirical mean cost for each campaign-bid pair.
-        self.mean_costs = np.zeros((self.n_campaigns, self.K), dtype=float)
+        self.mean_costs = np.zeros((self.n_campaigns, self.K), dtype=float) #NxK matrix
         # Save the last action so update() knows what to update.
-        self.last_bids = np.zeros(self.n_campaigns, dtype=float)
-        self.last_active = np.zeros(self.n_campaigns, dtype=bool)
-        # Precompute all feasible subsets once.
+        self.last_bids = np.zeros(self.n_campaigns, dtype=float) #last bid for eaxh campaign (n-dim array)
+        self.last_active = np.zeros(self.n_campaigns, dtype=bool) #last active campaigns (n-dim array - 1 if active, 0 otherwise)
+        # Precompute all feasible subsets once - using the helper method previously defined
         self.independent_sets = enumerate_independent_sets(self.conflict_graph)
 
-        # Trajectories useful for debugging and plotting.
+        # sequence of lambda values and budget values for plotting
         self.lambda_history = np.zeros(self.T, dtype=float)
         self.budget_history = np.zeros(self.T, dtype=float)
-
+    
+    
+    ############ HELPER METHODS ########################
+    #computes for all bid-campaign pairs the (optimistic) reward UCB simultaneously
     def _ucb_reward(self) -> np.ndarray:
         """
         Optimistic estimate of the reward.
@@ -618,21 +627,31 @@ class CombinatorialUCB1BiddingAgent(CombinatorialAgent):
         mean + confidence_radius.
         This is the standard UCB trick: be optimistic about uncertain pairs.
         """
+        #to avoid division by zero: at the denominator we divide by 1 if the bid has never been played for a certain campaign
+        #the max(T,2) allows the logarithm to remain positive at the numerator
         return self.mean_rewards + np.sqrt(
-            2.0 * np.log(max(self.T, 2)) / np.maximum(self.N, 1.0)
+            2.0 * np.log(max(self.T, 2)) / np.maximum(self.N, 1.0) 
         )
-
+    
+    #computes for all bid-campaign pairs the (optimistic) cost UCB simultaneously
     def _ucb_cost(self) -> np.ndarray:
         """
-        Optimistic estimate of the cost.
-
-        We keep a UCB for cost as well, because the budget penalty should be
-        applied to an optimistic estimate of spending, not only to reward.
+        Apply the same UCB-style inflation mechanism to cost as we do to reward, 
+        but use it to make risky-cost options look worse, not better, 
+        as a conservative safety margin against the hard budget constraint
+        
+        Cost enters the score with a minus sign. If the agent used an optimistic-low estimate of cost (an LCB), 
+        it would systematically underestimate how much it's about to spend. Combined with an already-optimistic 
+        reward estimate, that's a double bias toward actions that look cheap and rewarding but might not be;
+        a recipe for overspending and blowing the budget faster than the dual variable λ can react.
         """
+        #to avoid division by zero: at the denominator we divide by 1 if the bid has never been played for a certain campaign
+        #the max(T,2) allows the logarithm to remain positive at the numerator
         return self.mean_costs + np.sqrt(
             2.0 * np.log(max(self.T, 2)) / np.maximum(self.N, 1.0)
         )
 
+    ######## METHOD THAT DETERMINES WHICH ACTION THE AGENT CHOOSES AT THE CURRENT ROUND
     def pull_action(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         Choose the next action.
@@ -641,93 +660,111 @@ class CombinatorialUCB1BiddingAgent(CombinatorialAgent):
             bids:   one bid per campaign
             active:  True for campaigns we actually play
         """
-        # Store the state before choosing the next action.
+        
+        # Store the current state (lambda and remaining budget) before choosing the next action.
         if self.t < self.T:
             self.lambda_history[self.t] = self.lambda_t
             self.budget_history[self.t] = self.budget_remaining
 
         # If budget is gone, stop bidding altogether.
         if self.budget_remaining <= 1e-9:
-            self.last_bids[:] = 0.0
-            self.last_active[:] = False
-            return self.last_bids.copy(), self.last_active.copy()
-
-        # Very early rounds: play each campaign once so we collect an initial
-        # sample before trusting UCB.
+            self.last_bids[:] = 0.0 #set all bids to zero 
+            self.last_active[:] = False #do not participate to any campaign
+            return self.last_bids.copy(), self.last_active.copy() #return copies of these arrays
+        
+        ####"SORT OF UCB WARM-UP"
+        # Very early rounds: play each campaign once so we collect an initial sample before trusting UCB.
+        # in this way we avoid that N = 0 for every cell of the matrix of counts and the confidence bonus becomes
+        # meaningless for all of these cells with N=0. In this way at least some are different from zero
         if self.t < self.n_campaigns:
-            bids = np.zeros(self.n_campaigns, dtype=float)
-            active = np.zeros(self.n_campaigns, dtype=bool)
+            bids = np.zeros(self.n_campaigns, dtype=float) #initialize to zero bid vector (one bid per campaign)
+            active = np.zeros(self.n_campaigns, dtype=bool) #initialize to zero active campaign vector
             # We start with the second bid in the grid when possible, just to
             # avoid the trivial zero-bid opt-out during initialization.
-            bids[self.t] = self.bid_set[min(1, self.K - 1)]
+            bids[self.t] = self.bid_set[min(1, self.K - 1)] 
             active[self.t] = True
-            self.last_bids = bids
-            self.last_active = active
-            return bids.copy(), active.copy()
-
+            self.last_bids = bids #bids all to zero apart for the selected campaign
+            self.last_active = active #all campaigns not active apart from the selected one
+            return bids.copy(), active.copy() #return copy of last active and bids vector
+        
+        
+        ### GENERAL ROUND (AFTER WARM UP OF UCB - t>= number of campaigns)
         # Build optimistic tables for reward and cost.
-        ucb_r = self._ucb_reward()
-        ucb_c = self._ucb_cost()
+        ucb_r = self._ucb_reward() #compute reward UCB for each bid, campaign pair
+        ucb_c = self._ucb_cost() #compute cost UCB for each bid, campaign pair
 
         # We search over all independent sets and keep the one with best score.
-        best_score = -np.inf
-        best_bids = np.zeros(self.n_campaigns, dtype=float)
-        best_active = np.zeros(self.n_campaigns, dtype=bool)
-
+        best_score = -np.inf #initialize best score
+        best_bids = np.zeros(self.n_campaigns, dtype=float) #initialize best bid vector (one bid per campaign)
+        best_active = np.zeros(self.n_campaigns, dtype=bool) #initialize best active campaign vector (encodes best set of campaigns to play)
+        
+        #for each compatible set of campaigns
         for subset in self.independent_sets:
             # Start from an empty action and fill only the campaigns in subset.
-            bids = np.zeros(self.n_campaigns, dtype=float)#bid to assign to each campaign
-            active = np.zeros(self.n_campaigns, dtype=bool)
-            score = 0.0
+            bids = np.zeros(self.n_campaigns, dtype=float) #initialize bid vector
+            active = np.zeros(self.n_campaigns, dtype=bool) #initialize active campaign vector
+            score = 0.0 #score of the strategy (campaign + bid choice)initialized to zero
+            #iterate over campaigns in the compatible set of campaigns considered
             for i in subset:
                 # For campaign i, evaluate every bid:
-                # optimistic reward - λ * optimistic cost.
-                bid_scores = ucb_r[i] - self.lambda_t * ucb_c[i]#ignoring term+lambda rho, since its constant
-                b_idx = int(np.argmax(bid_scores))
-                bids[i] = self.bid_set[b_idx]
-                active[i] = True
-                score += float(bid_scores[b_idx])
+                # score(bid,i) optimistic reward - λ * optimistic cost (Lagrangian reward)
+                bid_scores = ucb_r[i] - self.lambda_t * ucb_c[i] #we compute the scores of all available bids for a campaign in parallel
+                #ignoring term+lambda rho, since its constant for every action it does not affect the choice of action
+                b_idx = int(np.argmax(bid_scores)) #retrieve index of bid with highest score
+                bids[i] = self.bid_set[b_idx] #retrieve the bid corresponding to previous index
+                active[i] = True #set the campaign as active 
+                score += float(bid_scores[b_idx]) #increment total score of the subset of campaigns
 
             # Keep the highest-scoring feasible subset.
-            if score > best_score:
-                best_score = score
-                best_bids = bids
-                best_active = active
-
-        self.last_bids = best_bids
+            if score > best_score: #if score of current subset of comaptible campaings is greater than the best so far -> new best
+                best_score = score #store the new best score
+                best_bids = bids #store the bid choice
+                best_active = active #sotre the active campaign vector
+        
+        #update last action details
+        self.last_bids = best_bids 
         self.last_active = best_active
-        return best_bids.copy(), best_active.copy()
+        return best_bids.copy(), best_active.copy() #eturn best bid choice and best set of campaigns
 
+    ##### METHOD THAT UPDATES INTERNAL STATE OF THE AGENT AFTER OBSERVATIONS DURING CURRENT ROUND
     def update(self, reward_vec, cost_vec):
         """
         Update empirical means after observing the realized feedback.
 
         Only the campaigns that were active in the chosen subset are updated.
         This is exactly the semi-bandit idea: we learn from the campaigns we
-        actually played, not from the ones we skipped.
+        actually played, not from the ones we skipped. SEMI-BANDIT FEEDBACK
+        
+        #not bandit feedback because we do not just observe the cumulative reward of the set of campaigns
+        #but the specific reward each campaign obtains 
         """
-        reward_vec = np.asarray(reward_vec, dtype=float)
-        cost_vec = np.asarray(cost_vec, dtype=float)
+        
+        #store reward vector and cost vector observed during current round
+        reward_vec = np.asarray(reward_vec, dtype=float) #reward vector has one reward per campaign
+        cost_vec = np.asarray(cost_vec, dtype=float) #cost vector has one vector per campaign
 
         # Update the statistics of the selected campaign-bid pairs.
+        #iterate over actually played campaigns (WE UPDATE THE STATISTICS ONLY OF THE PLAYED CAMPAIGNS)
         for i in np.where(self.last_active)[0]:
-            b = self.last_bids[i]
+            b = self.last_bids[i] #retrieve the bid of the last campaign
             # Map the floating bid back to an index in bid_set.
             b_idx = int(np.argmin(np.abs(self.bid_set - b)))
-            self.N[i, b_idx] += 1.0
+            self.N[i, b_idx] += 1.0 #increment the number of times that bid was played
 
-            # Normalize by campaign value so rewards live roughly in [0,1].
+            # Normalize the reward obtained at the current roundby campaign value so rewards live roughly in [0,1].
+            #update the mean reward of the considered campaign-bid pair
             self.mean_rewards[i, b_idx] += (
                 reward_vec[i] / max(self.values[i], 1e-12) - self.mean_rewards[i, b_idx]
-            ) / self.N[i, b_idx]
+            ) / self.N[i, b_idx] #incremental update of mean reward
 
             # Same normalization idea for cost, so reward and cost are on
             # comparable scales inside the Lagrangian.
+            #update the mean cost of the considered campaign-bid pair
             self.mean_costs[i, b_idx] += (
                 cost_vec[i] / max(self.values[i], 1e-12) - self.mean_costs[i, b_idx]
-            ) / self.N[i, b_idx]
+            ) / self.N[i, b_idx] #incremental update of mean cost
 
-        # Budget bookkeeping: subtract the realized cost from the remaining budget.
+        # update remaining budget
         total_cost = float(cost_vec.sum())
         self.budget_remaining -= total_cost
 
@@ -738,9 +775,10 @@ class CombinatorialUCB1BiddingAgent(CombinatorialAgent):
             self.lambda_t + self.eta * (total_cost - self.rho),
             0.0,
             1.0 / max(self.rho, 1e-12),
-        ))
-        self.t += 1
+        )) #increment lambda with OGD and clipping between 0 and 1/max(p, 1e-12)
+        self.t += 1 #increment round counter
 
+    #retireve sequence of lambda values and remaining budget values for plotting
     def get_histories(self) -> Tuple[np.ndarray, np.ndarray]:
         """Return the stored lambda/budget trajectories for the current trial."""
         return self.lambda_history.copy(), self.budget_history.copy()
@@ -995,3 +1033,310 @@ class PrimalDualHedgeBiddingAgent(CombinatorialAgent): #CHILD CLASS OF Combinato
     def get_histories(self) -> Tuple[np.ndarray, np.ndarray]:
         """Return the stored λ / budget trajectories (same API as Req 2)."""
         return self.lambda_history.copy(), self.budget_history.copy()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REQUIREMENT 4 — Non-stationarity-aware Combinatorial-UCB variants
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Extending the Combinatorial-UCB approach in Requirement 2 with
+# - sliding window
+# - a change detector"
+#
+# Both classes below SUBCLASS CombinatorialUCB1BiddingAgent and reuse its
+# pull_action() (how the action is chosen - bid choice and campaign choice) unchanged. The
+# only thing that changes is HOW the empirical statistics that feed the UCB
+# indices are maintained:
+# - SW-CUCB  : statistics computed only over the last `window` rounds
+#              (old regimes are forgotten automatically, by construction).
+# 
+# - CD-CUCB  : statistics accumulated as in vanilla CUCB, but a CUSUM test
+#              watches for distribution shifts and triggers a GLOBAL
+#              RESTART of the statistics when one is detected
+#              (old regimes are forgotten reactively, on evidence for all campaigns
+#              not just the one on which the distribution shift was noted).
+#
+# Both adaptations allow to take in consideration that the environment is slightly non stationary. 
+
+
+from collections import deque #to implement the window (deque = DOUBLE ENDED QUEUE)
+
+#### SLIDING WINDOW UCB IMPLEMENTATION (SW-CUCB)
+class SlidingWindowCombinatorialUCBAgent(CombinatorialUCB1BiddingAgent):
+    """
+    Combinatorial-UCB with a SLIDING WINDOW
+
+    Idea: vanilla CUCB averages over its ENTIRE history, so after a regime
+    change its means are polluted by observations (cost and rewards and counts) from the previous regime.  
+    SW-CUCB instead computes means and counts using ONLY the last `window` rounds: any sample
+    older than that is dropped.  After a change in regime, the window fully purges
+    the dead regime within at most `window` rounds, the agent then behaves
+    as if it had started fresh inside the new regime.
+
+    Implementation: a deque of per-round records (t, campaign, bid_idx,
+    reward_norm, cost_norm) plus incrementally-maintained windowed sums.
+    
+    The parent's self.N, self.mean_rewards, self.mean_costs are kept
+    pointing at the WINDOWED statistics, so the parent's pull_action() and
+    UCB machinery work unmodified on top of them.
+
+    The confidence bonus in the UCB calculation uses log(min(t, window)) instead of log(T): the
+    effective sample horizon is the window, so the exploration bonus should
+    be calibrated to it (standard SW-UCB recipe).
+    """
+    
+    #assing label to class to identify agent in plots
+    label: str = "SW-Combinatorial-UCB"
+
+    #CONSTRUCTOR
+    def __init__(
+        self,
+        bid_set: np.ndarray, #set of possible bids
+        values: Sequence[float], #array of campaign values
+        conflict_graph: np.ndarray, #conflict graph (NxN) matrix where N is num of campaigns
+        T: int, #time horizon of the problem
+        rho: float, #per-round budget
+        window: int = 400, #size of the sliding window
+        eta: float = None, #learning rate of the dual part of the problem
+    ):
+        # Parent constructor sets up everything vanilla CUCB needs
+        # (bid set, λ, budget, N / mean tables, independent sets, histories).
+        super().__init__(
+            bid_set=bid_set, values=values, conflict_graph=conflict_graph,
+            T=T, rho=rho, eta=eta,
+        )
+        
+        #SETTING UP OF SLIDING WINDOW EXTENSION
+        #instantiate attrivute for window length (minium 1)
+        self.window = max(1, int(window))
+
+        # Per-round records inside the current window.
+        # Each record: (round t, campaign i, bid index b, r_norm, c_norm).
+        self._records: deque = deque() #instantiate window as double ended queue
+
+        # compute running sums of rewards and costs for each campaign,bid pair restricted to the window
+        #the means are computed by dividing by the count matrix (restricted to window too)
+        self._sum_rewards = np.zeros((self.n_campaigns, self.K), dtype=float) #NxK matrix
+        self._sum_costs = np.zeros((self.n_campaigns, self.K), dtype=float) #NxK matrix
+
+    ##### windowed confidence radius (confide bonus)
+    # method to define the log horizon
+    def _log_horizon(self) -> float:
+        """log of the effective horizon: the window (or t, early on)."""
+        return np.log(max(min(self.t + 1, self.window), 2)) #same trick of computing max between horizon and 2 (to esnsure log is positive)
+        #returns the value of log(max(horizon of window, 2))
+    
+    #computes UCB of reward for each campaign, bid pair simultaneously (return NxK matrix)
+    def _ucb_reward(self) -> np.ndarray:
+        return self.mean_rewards + np.sqrt(
+            2.0 * self._log_horizon() / np.maximum(self.N, 1.0)
+        )
+    
+    #computes UCB of cost for each campaign, bid pair simultaneously (return NxK matrix)
+    def _ucb_cost(self) -> np.ndarray:
+        return self.mean_costs + np.sqrt(
+            2.0 * self._log_horizon() / np.maximum(self.N, 1.0)
+        )
+
+    #### UPDATE METHOD TO UPDATE THE INTERNAL STATE OF THE AGENT 
+    #(OVER-RIDES THE UPDATE METHOD OF THE FATHER CLASS IN ORDER TO IMPLEMENT THE MAINTAINANCE OF WINDOW STATISTICS)
+    def update(self, reward_vec, cost_vec):
+        """
+        Same interface as the parent (semi-bandit: only played campaigns are
+        observed), but statistics live in a sliding window:
+          1. append this round's records and add them to the windowed sums;
+          2. expire records older than (t − window) and subtract them;
+          3. refresh N / mean tables from the windowed sums;
+          4. budget bookkeeping + dual OGD step, identical to the parent.
+        """
+        #store the reward and cost vector of the current round
+        reward_vec = np.asarray(reward_vec, dtype=float)
+        cost_vec = np.asarray(cost_vec, dtype=float)
+
+        #### INSERT NEW OBSERVATIONS
+        #iterate over active campaigns in the last round
+        for i in np.where(self.last_active)[0]:
+            b = self.last_bids[i] #retrieve last bid played for the considered active campaign
+            b_idx = int(np.argmin(np.abs(self.bid_set - b))) #retrieve the index of the bid
+            r_norm = reward_vec[i] / max(self.values[i], 1e-12) #normalize the reward by the campaign value so that in [0,1]
+            c_norm = cost_vec[i] / max(self.values[i], 1e-12) #normalize the cost by the campaign value so that in [0,1]
+            self._records.append((self.t, i, b_idx, r_norm, c_norm)) #add the observations of the current round to the window of records
+            self.N[i, b_idx] += 1.0 #increment the number of times the last bid was played for the conisdered campaign
+            self._sum_rewards[i, b_idx] += r_norm #increment sum of rewards with observed normalized reward
+            self._sum_costs[i, b_idx] += c_norm #increment sum of costs with observed normalized cost 
+            #updating running sums constrained to the window
+
+        ###### EXPIRE EVERYTHING THAT FALLS OUT OF THE WINDOW
+        cutoff = self.t - self.window #compute the oldest round still allowed 
+        #while there are records and the oldest record in the queue is older than the oldest valid round
+        #left pop from the queue the record of that round. The queue is double ended but we will make sure that pops
+        #happen on the left and pushes on the right.
+        while self._records and self._records[0][0] <= cutoff:
+            t_old, i, b_idx, r_norm, c_norm = self._records.popleft() #pop the records
+            self.N[i, b_idx] -= 1.0 # #reduce the count by one for the bid-campaign pair of the record
+            self._sum_rewards[i, b_idx] -= r_norm #subtract the normalized reward of the record from the sum of rewards
+            self._sum_costs[i, b_idx] -= c_norm #subtract the normalized cost of the record from the sum of costs
+
+        ####### UPDATE THE MEAN REWARD MATRIX AND COST REWARD MATRIX FOR EACH BID-CAMPAIGN PAIR
+        #these matrices are then used to compute the UCB for each campaign-bid pair
+        with np.errstate(divide="ignore", invalid="ignore"): 
+            self.mean_rewards = np.where(
+                self.N > 0, self._sum_rewards / np.maximum(self.N, 1.0), 0.0
+            )
+            self.mean_costs = np.where(
+                self.N > 0, self._sum_costs / np.maximum(self.N, 1.0), 0.0
+            )
+
+        ####### UPDATE REMAINING BUDGET
+        total_cost = float(cost_vec.sum()) #total cost of the current round (sum of cost for each campaign)
+        self.budget_remaining -= total_cost #reduce remaining budget
+        self.lambda_t = float(np.clip(
+            self.lambda_t + self.eta * (total_cost - self.rho),
+            0.0,
+            1.0 / max(self.rho, 1e-12),
+        )) #update eta (learning rate) of dual
+        self.t += 1 #increment round counter
+
+
+#### CHANGE-DETECTION UCB IMPLEMENTATION (CD-CUCB)
+class ChangeDetectorCombinatorialUCBAgent(CombinatorialUCB1BiddingAgent):
+    """
+    Combinatorial-UCB with a CHANGE DETECTOR 
+
+    Idea: instead of continuously forgetting older rounds (sliding window), keep vanilla
+    CUCB's full-history statistics, which are statistically efficient while
+    the regime is stable, but actively watch for evidence that the reward
+    distribution has shifted, and when it has, throw the stale statistics
+    away and restart learning.
+    You observe in parallel for all campaigns if there is a distribution shift and then,
+    if present, perform a global restart
+
+    Detector: a two-sided CUSUM per (campaign, bid) pair, run on the
+    normalized rewards (∈ [0,1]) of the pairs actually played:
+
+        after `warmup` samples of a pair, freeze its reference mean m0;
+        for each later sample x of that pair update
+            g+ ← max(0, g+ + (x − m0 − drift))
+            g− ← max(0, g− + (m0 − x − drift))
+        declare a change when g+ > threshold or g− > threshold.
+
+    `drift` absorbs ordinary sampling noise (small deviations don't
+    accumulate); `threshold` sets how much cumulative evidence is needed.
+
+    On detection → GLOBAL RESTART: N / means / detector state are reset for
+    ALL pairs, because in our environments every campaign switches regime at
+    the same breakpoints, so one pair's alarm is evidence the whole world
+    changed.  λ and the remaining budget are NOT reset — the budget
+    constraint spans the whole horizon, regime changes don't refill it.
+    """
+    
+    #label to identify agent for plotting
+    label: str = "CD-Combinatorial-UCB"
+    
+    #CONSTRUCTOR
+    def __init__(
+        self,
+        bid_set: np.ndarray,
+        values: Sequence[float],
+        conflict_graph: np.ndarray,
+        T: int,
+        rho: float,
+        cd_warmup: int = 20, #ADDITIONAL PARAMETER - change detection warm up
+        cd_drift: float = 0.10, #ADDITIONAL PARAMETER - change detection drift
+        cd_threshold: float = 1.5, #ADDITIONAL PARAMETER - change detection threshold
+        eta: float = None,
+    ):
+        #call father class constructor
+        super().__init__(
+            bid_set=bid_set, values=values, conflict_graph=conflict_graph,
+            T=T, rho=rho, eta=eta,
+        )
+        #setup additional attributes (w.r.t father class)
+        self.cd_warmup = max(1, int(cd_warmup)) #ADDITIONAL ATTRIBUTE: change detection warmup
+        self.cd_drift = float(cd_drift) #ADDITIONAL ATTRIBUTE: change detection drift 
+        self.cd_threshold = float(cd_threshold) #ADDITIONAL ATTRIBUTE: change detection threshold
+
+        # PER CAMPAIGN-BID PAIR DRIFT DETECTOR STATE
+        self._ref_mean = np.zeros((self.n_campaigns, self.K), dtype=float) #matrix of frozen reference means (one per campaign,bid pair) - NxK
+        self._ref_frozen = np.zeros((self.n_campaigns, self.K), dtype=bool) #matrix NxK that tells whether the reference mean has been frozen yet or not (for each campaign,bid pair)
+        self._g_plus = np.zeros((self.n_campaigns, self.K), dtype=float) #matrix of positivce accumulators for each bid,campaign pair - NxK
+        self._g_minus = np.zeros((self.n_campaigns, self.K), dtype=float) #matrix of negative accumulators for each bid,campaign pair - NxK
+
+        # list to store rounds at which a restart was triggered (for evaluation/plots).
+        self.detections: list = []
+        
+        # parameters for cooldown to have a quiet period after a restart to avoid triggering another restart in cascade
+        self._last_restart = -10**9      # tracks when we last restarted
+        self.cd_cooldown = 50   #cooldown period
+    
+    #### METHOD TO RESTART STATISTICS
+    #it initialize the drift detectors' state and the UCB statistics (a part from lambda and budget)
+    def _restart_statistics(self) -> None:
+        """Global restart: wipe learning + detector state, keep λ/budget/t."""
+        self.N[:] = 0.0
+        self.mean_rewards[:] = 0.0
+        self.mean_costs[:] = 0.0
+        self._ref_mean[:] = 0.0
+        self._ref_frozen[:] = False
+        self._g_plus[:] = 0.0
+        self._g_minus[:] = 0.0
+    
+    
+    ##### METHOD TO UPDATE INTERNAL STATE OF THE AGENT
+    def update(self, reward_vec, cost_vec):
+        """
+        1. Standard vanilla-CUCB statistics update (delegated to the parent —
+           it also does budget bookkeeping and the dual OGD step).
+        2. Feed the CUSUM detector with this round's normalized rewards.
+        3. If any pair's CUSUM fires → global restart of the statistics.
+        """
+        
+        #we transform the reward vector in a numpy array to perform mathematical operations on it
+        #we do not do it for the cost vector because it is done by the update of the father class that we invoke below
+        #and in this method is not used
+        reward_vec = np.asarray(reward_vec, dtype=float)
+
+        """"
+        Before calling the parent's update, snapshot which (campaign, bid_idx) pairs were just played. 
+        This is necessary because the parent's update() (called next) will use self.last_active/self.last_bids too, 
+        but nothing guarantees they survive unchanged after. They should, but this keeps statistics update and change detection
+        two separate processes.
+        """
+        played = [
+            (i, int(np.argmin(np.abs(self.bid_set - self.last_bids[i]))))
+            for i in np.where(self.last_active)[0]
+        ] #returns (campaign_idx, bid_idx) pairs of the last played pairs
+
+        ### VANNILLA STATISTICS UPDATE: STATISTICS FOR PRIMAL, BUDGET, LEARNING RATE OF DUAL
+        super().update(reward_vec, cost_vec)
+        # ATTENTION: super().update() already incremented self.t. (do not increment it later)
+
+        #UPDATE CUSUM STATISTICS on the played pairs' normalized rewards.
+        fired = False #FALSE = no change detected, TRUE = change detection
+        #iterate over last played pairs
+        for i, b_idx in played:
+            x = reward_vec[i] / max(self.values[i], 1e-12) #normalize the reward with respect to the value of the campaign
+            n = self.N[i, b_idx] #read the pair current count
+            if not self._ref_frozen[i, b_idx]: #if reference mean not frozen yet
+                # Warm-up phase: keep tracking the running mean as reference.
+                self._ref_mean[i, b_idx] = self.mean_rewards[i, b_idx] #update the reference mean of the pair with the current mean
+                if n >= self.cd_warmup: #if number of times pair is played greater than warmup rounds
+                    self._ref_frozen[i, b_idx] = True #freez the reference mean
+            else:
+                m0 = self._ref_mean[i, b_idx] #get reference mean
+                self._g_plus[i, b_idx] = max(
+                    0.0, self._g_plus[i, b_idx] + (x - m0 - self.cd_drift)
+                ) #update upper accumulator
+                self._g_minus[i, b_idx] = max(
+                    0.0, self._g_minus[i, b_idx] + (m0 - x - self.cd_drift)
+                )#update lower accumualator
+                if (self._g_plus[i, b_idx] > self.cd_threshold
+                        or self._g_minus[i, b_idx] > self.cd_threshold): #if one of the two accumulators above threshold
+                    fired = True #fire change detection
+
+        #if change detected memorize round in which it was detected and restart detections statistics and primal UCB statistics
+        # check also we are not in cooldown period
+        if fired and (self.t - self._last_restart) > self.cd_cooldown:
+            self.detections.append(self.t - 1)
+            self._restart_statistics()
+            self._last_restart = self.t

@@ -194,3 +194,83 @@ a very tight interval between in [0,1] meaning that the rewards of the different
 # NOT ADDED DIRECTLY TO DICTIONARY TO SHOW INCREMENTAL NATURE OF PROJECT
 AGENT_COLORS["Primal-Dual (Hedge)"] = "#e377c2"   # pink
 AGENT_COLORS["Combinatorial-UCB"]   = "#17becf"   # teal
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9.  REQUIREMENT 4 — Slightly non-stationary environment  (additions)
+# ─────────────────────────────────────────────────────────────────────────────
+
+####### ENVIRONMENT'S SLIGHTLY NON-STATIONARY BEHAVIOR ##########
+"""
+Requirement 4 asks for a SLIGHTLY non-stationary environment:
+- Rounds are partitioned in intervals
+- In each interval the distribution of highest competing bids is FIXED
+- Each interval has a DIFFERENT distribution
+
+The environment is very similar to the one of Requirement 3, only that the one 
+in Req3 was (highly) non-stationary, whilst this one is slightly non stationary. 
+Therefore instead of having many small intvervals, we have less but longer intervals.
+The design choice is to set the number of intervals to 5. With T=2000, each interval is
+500 rounds long.
+Longer intervals allow the slinding window and change detection mechanism enough rounds
+to make the agent adapt to the new distribution and converge to a good strategy.
+"""
+N_INTERVALS_REQ4: int = 5
+
+####### SLIDING WINDOW SIZE ##########
+"""
+Window W of the sliding-window Combinatorial-UCB (SW-CUCB).
+Only the last W observations are used to compute the empirical means, so
+data from old regimes is automatically forgotten after at most W rounds.
+
+Trade-off on the window size is important:
+- W too large: The window still contains samples from the previous interval 
+                and contaminate the means computed for the current interval. 
+                We incurr in the same failure of the vanille Combinatorial UCB
+                that doesn't adapt to changes in the distribution of highest competing
+                bids in the environment. 
+- W too small: too few samples are present in the window per (campaign, bid) pair, 
+               so the means of the rewards of these pairs is noisy and the agent never
+               becomes confident enought to stop exploring.
+"""
+#tuned via some attempts
+SW_WINDOW_REQ4: int = 400
+
+####### CHANGE DETECTOR (CUSUM) PARAMETERS ##########
+"""
+The change-detector Combinatorial-UCB (CD-CUCB) runs a two-sided CUSUM test
+per (campaign, bid) pair on the NORMALIZED rewards (in [0,1]):
+
+  after a warm-up of CD_WARMUP samples, the pair's reference mean m0 is
+  frozen; each new sample x updates
+      g+ ← max(0, g+ + (x − m0 − CD_DRIFT))
+      g− ← max(0, g− + (m0 − x − CD_DRIFT))
+  and a change is declared when g+ > CD_THRESHOLD or g− > CD_THRESHOLD.
+
+In words: after a warm-up period, each pair's reference mean normalized reward m0 is frozen, this represents
+what the pair looked like when things were stable. Ever new observation x is compared to m0. 
+Two running accumulators track how much the observations have been drifting aboe m0 (g+) and
+below m0 (g-). When either accumualtor croses the threshold, enough cumulative 
+evidence has been acumulated to delcate the distribtion has changed -> change detected. 
+
+On detection the agent performs a GLOBAL RESTART of its statistics (all
+pairs), assuming (as done in our environment) that all campaigns switch regime at the same
+breakpoints, valid assuption since a change detected on one pair is strong evidence that the
+whole world changed.  λ and the remaining budget are NOT reset: the budget
+constraint spans the whole horizon regardless of regime changes.
+- CD_DRIFT   : tolerated slack around m0, absorbs sampling noise so small
+                 fluctuations don't accumulate into false alarms.
+- CD_THRESHOLD: how much cumulative evidence is required to declare a
+                 change, higher = fewer false alarms, slower detection.
+- CD_WARMUP: samples needed before the reference mean m0 is trusted.
+"""
+#THE DESIGN CHOICES ARE THE FOLLOWING
+#standard rule of thumb values (play wiuth them to observe how results change)
+#tuned via several attempts
+CD_WARMUP: int = 30 
+CD_DRIFT: float = 0.25
+CD_THRESHOLD: float = 5
+
+# Plot colours for the two new Requirement-4 agents.
+AGENT_COLORS["SW-Combinatorial-UCB"] = "#bcbd22"   # olive
+AGENT_COLORS["CD-Combinatorial-UCB"] = "#7f7f7f"   # dark grey

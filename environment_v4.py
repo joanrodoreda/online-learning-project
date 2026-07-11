@@ -940,3 +940,143 @@ def compute_hindsight_clairvoyant(
 
     return best_subset, best_bid_idx, best_value #return best strategy - best set of compatible campaigns and bid choice of those campaigns to play in a fixed manner over the entire time horizon 
     #return also the average per-round reward of this strategy across all the campaigns
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REQUIREMENT 4 — Slightly non-stationary environment + dynamic oracle
+# ═════════════════════════════════════════════════════════════════════════════
+# Provides:
+# - SlightlyNonStationaryMultiCampaignEnv — rounds partitioned in FEW, LONG
+#   intervals; fixed distribution inside each interval; different
+#   distribution per interval 
+#
+# - compute_per_interval_clairvoyant — the DYNAMIC oracle: best fixed
+#   feasible action *per interval* in hindsight.  This is the natural
+#   benchmark for piecewise-stationary environments: it is exactly what a
+#   perfectly-adapting algorithm (one that instantly re-learns after each
+#   breakpoint) could hope to track.
+
+
+class SlightlyNonStationaryMultiCampaignEnv(NonStationaryMultiCampaignEnv): #CHILD CLASS OF NonStationaryMultiCampaignEnv
+    #remember NonStationaryMultiCampaginEvn is a child class of MultiCampaignEnv (which overrides the _pre_generate_joint_bids)
+    #this class inherits from the father class all of its methods (indirectly inheriting also from MultiCampaignEnv) thos attributes
+    #and methods that were not overwritten by NonStationaryMultiCampaignEnv.
+    
+    """
+    Slightly non-stationary multi-campaign environment.
+
+    Mechanically this is IDENTICAL to Requirement 3's piecewise-constant
+    generator (NonStationaryMultiCampaignEnv): at every breakpoint the
+    parameters of each campaign's distribution are re-drawn from
+    `param_ranges` while the distribution FAMILY stays fixed.  What changes
+    is purely quantitative — the interval length:
+
+        Requirement 3 ("highly"):   change_every = 25  → 80 regimes in T=2000
+        Requirement 4 ("slightly"): n_intervals  = 5   → interval = 400 rounds
+
+    The constructor takes the number of intervals (more natural for Req 4)
+    and converts it to the parent's `change_every`.
+    """
+    #CONSTRUCTOR - THE INPUT PARAMETERS ARE EXACTLY THE SAME AS THE ONE OF NonStationaryMultiCampaignEnv 
+    # (a part from n_intervals from which we will derive change_every)
+    def __init__(
+        self,
+        bid_set: np.ndarray,
+        values: Sequence[float],
+        dist_configs: Sequence[dict],
+        T: int,
+        conflict_graph: np.ndarray,
+        rho: float,
+        n_intervals: int = 5,
+        param_ranges: Optional[dict] = None,
+        correlation: float = 0.0,
+    ):
+        # we ensure that the number of interval is at least one (cannot be negative)
+        self.n_intervals = max(1, int(n_intervals))
+        #we derive from the number of intervals  (the interval length)
+        interval_length = int(np.ceil(T / self.n_intervals))
+        #if T is not an exact multiple of number of intervals, round up with ceil permits us to still get exactlty n_intervals
+
+        # Ground-truth breakpoints: first round of every interval after the
+        # first one.  E.g. T=2000, 5 intervals → [400, 800, 1200, 1600].
+        self.breakpoints = list(range(interval_length, T, interval_length))
+
+        # Everything else (parameter re-drawing at each block boundary,
+        # per-family sampling, clipping, pre-generation of the full (T, N)
+        # competing-bid matrix) is inherited unchanged from the parent class 
+        # interval length corresponds to change_every.
+        
+        #invoke the constructor of the father class 
+        # in turn it invokes the constructor of its father class.
+        super().__init__(
+            bid_set=bid_set,
+            values=values,
+            dist_configs=dist_configs,
+            T=T,
+            conflict_graph=conflict_graph,
+            rho=rho,
+            change_every=interval_length,
+            param_ranges=param_ranges,
+            correlation=correlation,
+        )
+
+# IMPLEMENTATION OF THE CLAIRVOYANT AGENT (new benchamark for Req4) - DYNAMIC CLAIRVOYANT AGENT / DYNAMIC ORACLE
+# The agent will choose the best fixed action for each interval - having observed the interval's sequence of highest competing bids
+def compute_per_interval_clairvoyant(
+    competing_bids: np.ndarray,
+    bid_set: np.ndarray,
+    values: Sequence[float],
+    conflict_graph: np.ndarray,
+    rho: float,
+    breakpoints: Sequence[int],
+) -> float:
+    """
+    DYNAMIC ORACLE for a piecewise-stationary sequence (Requirement 4).
+
+    The Requirement-3 hindsight clairvoyant is forced to keep ONE fixed
+    action for the whole horizon — a fair benchmark for a fast, arbitrary
+    adversary, but a weak one for a piecewise-stationary world with few long
+    intervals: there, a good adaptive algorithm can genuinely re-learn the
+    best action of EACH interval, so it should be measured against an oracle
+    that is allowed to do the same and choose its best fixed action at every interval.
+    
+    In practice this dynamic clairvoyant agent corresponds to applying the
+    clairvoyant agent of Req3 on each interval of this slightly non-stationary environment, 
+    in order to find the best fixed action on every interval. In each interval the clairvoyant agent
+    has a per-round budget * interval budget it can spend.
+
+    INPUT PARAMS:
+    - highest competing bids matrix (T,N)
+    - set of possible bids (K-dim array)
+    - array of values of campaign (N-dim array)
+    - conflict graph (NxN) matrix - 1 when two campaigns are compatible, 0 otherwise
+    - rho (per-round budget)
+    - breakpoints: list of the start of each interval
+
+    RERTURNS: 
+    float — average per-round value (reward) of the dynamic oracle
+    #differently from previous clairvoyant agents we do not return the best set of compatible campaigns and the bid choice for each campaign.
+    """
+    
+    #we convert the highet competing bid matrix into a numpy matrix to allow to perform mathematical operations upon it.
+    m = np.asarray(competing_bids, dtype=float)
+    T_len = m.shape[0] #store the time horizon the problem
+
+    # Build slice edges: [0, bp1, bp2, ..., T] starting from the breakpoints
+    edges = [0] + [int(b) for b in breakpoints] + [T_len]
+    ##### BREAKPOINTS vs EDGES
+    #BREAKPOINTS: list of starting round for each interval
+    #EDGES: list of starting round for each interval, plus first start (round 0) and last start (round T)
+    
+    #COMPUTE TOTAL REWARD OF THE CLAIRVOYANT AGENT
+    total_reward = 0.0 #INITIALIZED TO ZERO
+    for start, end in zip(edges[:-1], edges[1:]):
+        if end <= start:
+            continue #skip any empty interval - an edge case safety guard
+        # Best fixed feasible action in hindsight ON THIS INTERVAL ONLY (Clairvoyant agent of Req3 on considered interval)
+        _, _, per_round_val = compute_hindsight_clairvoyant(
+            m[start:end], bid_set, values, conflict_graph, rho,
+        ) #call the function to compute the best strategy for Req3 clairvoyant agent on current interval and we retrieve only the average per-round reward in the current interval
+        total_reward += per_round_val * (end - start) #current total = previous total + length of interval * per-round reward.
+
+    return total_reward / T_len #AVERAGE PER-ROUND REWARD OF CLAIRVOYANT AGENT IS TOTAL REWARD / TIME HORIZON
