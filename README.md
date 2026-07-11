@@ -137,4 +137,4 @@ Regret is estimated over multiple independent trials and reported as
 
 ## Authors
 
-Joan Rodoreda · Gianluca Croce · [third member] — *Online Learning Applications*, Politecnico di Milano.
+Joan Rodoreda · Gianluca Croce · Davide Bottinelli — *Online Learning Applications*, Politecnico di Milano.
